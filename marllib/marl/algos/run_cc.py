@@ -23,6 +23,7 @@
 import ray
 import gym
 from ray import tune
+from typing import Dict
 from ray.rllib.utils.framework import try_import_tf, try_import_torch
 from marllib.marl.algos.scripts import POlICY_REGISTRY
 from marllib.marl.common import recursive_dict_update, dict_update
@@ -58,9 +59,8 @@ def restore_config_update(exp_info, run_config, stop_config):
     return exp_info, run_config, stop_config, restore_config
 
 
-def run_cc(exp_info, env, model, stop=None):
+def run_cc(exp_info: Dict, env, model, stop=None):
     ray.init(local_mode=exp_info["local_mode"], num_gpus=exp_info["num_gpus"])
-
     ########################
     ### environment info ###
     ########################
@@ -165,16 +165,18 @@ def run_cc(exp_info, env, model, stop=None):
     run_config = {
         "seed": int(exp_info["seed"]),
         "env": exp_info["env"] + "_" + exp_info["env_args"]["map_name"],
-        "num_gpus_per_worker": exp_info["num_gpus_per_worker"],
+        "num_gpus_per_worker": exp_info.get("num_gpus_per_worker", 0),
         "num_gpus": exp_info["num_gpus"],
         "num_workers": exp_info["num_workers"],
+        "num_envs_per_worker": exp_info.get("num_envs_per_worker", 1),
         "multiagent": {
             "policies": policies,
             "policy_mapping_fn": policy_mapping_fn
         },
         "framework": exp_info["framework"],
         "evaluation_interval": exp_info["evaluation_interval"],
-        "simple_optimizer": False  # force using better optimizer
+        "simple_optimizer": False,  # force using better optimizer
+        "track": exp_info.get("track", False)
     }
 
     stop_config = {

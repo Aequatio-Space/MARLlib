@@ -36,6 +36,7 @@ from typing import Any, Dict, Tuple
 import yaml
 import os
 import sys
+from copy import deepcopy
 
 SYSPARAMs = deepcopy(sys.argv)
 
@@ -142,14 +143,17 @@ def make_env(
                 env_config["env"]))
 
     env_reg_name = env_config["env"] + "_" + env_config["env_args"]["map_name"]
-
+    no_log_args = deepcopy(env_config["env_args"])
+    try:
+        no_log_args['env_params'].pop("logging_config")
+    except KeyError:
+        print("No logging config detected, continuing")
     if env_config["force_coop"]:
         register_env(env_reg_name, lambda _: COOP_ENV_REGISTRY[env_config["env"]](env_config["env_args"]))
-        env = COOP_ENV_REGISTRY[env_config["env"]](env_config["env_args"])
+        env = COOP_ENV_REGISTRY[env_config["env"]](no_log_args)
     else:
         register_env(env_reg_name, lambda _: ENV_REGISTRY[env_config["env"]](env_config["env_args"]))
-        env = ENV_REGISTRY[env_config["env"]](env_config["env_args"])
-
+        env = ENV_REGISTRY[env_config["env"]](no_log_args)
     return env, env_config
 
 

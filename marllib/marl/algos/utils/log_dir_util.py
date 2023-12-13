@@ -23,6 +23,10 @@
 import shutil
 import os
 
-__total, __used, __free = shutil.disk_usage(".")
+sub_dir_name = "marllib_results"
 
-available_local_dir = '{}/exp_results'.format(os.getcwd()) if __used / __total <= 0.95 else '/mnt/exp_results'
+path_to_log = os.path.join("/workspace", "saved_data")
+__total, __used, __free = shutil.disk_usage(path_to_log)
+
+available_local_dir = os.path.join(path_to_log, sub_dir_name) \
+    if __used / __total <= 0.95 else os.path.join("/mnt", sub_dir_name)
