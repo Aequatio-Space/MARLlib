@@ -176,7 +176,8 @@ def run_cc(exp_info: Dict, env, model, stop=None):
         "framework": exp_info["framework"],
         "evaluation_interval": exp_info["evaluation_interval"],
         "simple_optimizer": False,  # force using better optimizer
-        "track": exp_info.get("track", False)
+        "track": exp_info.get("track", False),
+        "remote_worker_envs": exp_info.get("remote_worker_envs", False),
     }
 
     stop_config = {
