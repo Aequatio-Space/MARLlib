@@ -86,6 +86,7 @@ def run_mappo(model: Any, exp: Dict, run: Dict, env: Dict,
     config = {
         "batch_mode": batch_mode,
         "train_batch_size": train_batch_size,
+        "rollout_fragment_length": _param["rollout_fragment_length"],
         "sgd_minibatch_size": sgd_minibatch_size,
         "lr": lr if restore is None else 1e-10,
         "entropy_coeff": entropy_coeff,
@@ -100,6 +101,7 @@ def run_mappo(model: Any, exp: Dict, run: Dict, env: Dict,
             "custom_model": "Centralized_Critic_Model",
             "custom_model_config": back_up_config,
         },
+        "grad_clip": _param["grad_clip"],
     }
     config.update(run)
     config['logging_config'] = exp['logging_config']
@@ -116,7 +118,7 @@ def run_mappo(model: Any, exp: Dict, run: Dict, env: Dict,
     if run['track']:
         logger = None
     else:
-        logger = CLIReporter(max_report_frequency=30)
+        logger = CLIReporter(max_report_frequency=5)
     results = tune.run(my_trainer,
                        name=RUNNING_NAME,
                        checkpoint_at_end=exp['checkpoint_end'],
@@ -125,6 +127,7 @@ def run_mappo(model: Any, exp: Dict, run: Dict, env: Dict,
                        stop=stop,
                        config=config,
                        verbose=1,
+                       reuse_actors=True,
                        progress_reporter=logger,
                        callbacks=exp.get("callbacks", []),
                        local_dir=available_local_dir if exp["local_dir"] == "" else exp["local_dir"])
