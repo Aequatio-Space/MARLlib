@@ -8,4 +8,5 @@ WandbPPOTrainer = build_wandb_trainer(
     default_policy=PPOTFPolicy,
     get_policy_class=get_policy_class,
     execution_plan=execution_plan,
+    allow_unknown_configs=True
 )

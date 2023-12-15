@@ -23,12 +23,15 @@
 import ray
 import gym
 from ray import tune
+from envs.crowd_sim.crowd_sim import teams_name
 from typing import Dict
 from ray.rllib.utils.framework import try_import_tf, try_import_torch
+from ray.rllib.env.base_env import _DUMMY_AGENT_ID
 from marllib.marl.algos.scripts import POlICY_REGISTRY
 from marllib.marl.common import recursive_dict_update, dict_update
 
 torch, nn = try_import_torch()
+
 
 
 def restore_config_update(exp_info, run_config, stop_config):
@@ -60,7 +63,9 @@ def restore_config_update(exp_info, run_config, stop_config):
 
 
 def run_cc(exp_info: Dict, env, model, stop=None):
-    ray.init(local_mode=exp_info["local_mode"], num_gpus=exp_info["num_gpus"])
+    ray.init(local_mode=exp_info["local_mode"], num_gpus=exp_info["num_gpus"],
+             # runtime_env={"env_vars": {"CUBLAS_WORKSPACE_CONFIG": ":4096:8"}}
+             )
     ########################
     ### environment info ###
     ########################
@@ -127,8 +132,13 @@ def run_cc(exp_info: Dict, env, model, stop=None):
                 groups
             }
             policy_ids = list(policies.keys())
-            policy_mapping_fn = tune.function(
-                lambda agent_id: "policy_{}_".format(agent_id.split("_")[0]))
+
+            def policy_mapping_fn(agent_id, episode, worker, **kwargs):
+                if agent_id != _DUMMY_AGENT_ID:
+                    return "policy_" + agent_id.split("_")[0]
+                else:
+                    return "policy_" + teams_name[0]
+
 
     elif exp_info["share_policy"] == "individual":
         if not policy_mapping_info["one_agent_one_policy"]:
@@ -138,10 +148,14 @@ def run_cc(exp_info: Dict, env, model, stop=None):
             "policy_{}".format(i): (None, env_info["space_obs"], env_info["space_act"], {}) for i in
             range(env_info["num_agents"])
         }
-        policy_ids = list(policies.keys())
-        policy_mapping_fn = tune.function(
-            lambda agent_id: policy_ids[agent_name_ls.index(agent_id)])
 
+        policy_ids = list(policies.keys())
+
+        def policy_mapping_fn(agent_id, episode, worker, **kwargs):
+            if agent_id != _DUMMY_AGENT_ID:
+                return policy_ids[agent_name_ls.index(agent_id)]
+            else:
+                return "policy_" + teams_name[0]
     else:
         raise ValueError("wrong share_policy {}".format(exp_info["share_policy"]))
 
@@ -155,8 +169,12 @@ def run_cc(exp_info: Dict, env, model, stop=None):
             range(env_info["num_agents"])
         }
         policy_ids = list(policies.keys())
-        policy_mapping_fn = tune.function(
-            lambda agent_id: policy_ids[agent_name_ls.index(agent_id)])
+
+        def policy_mapping_fn(agent_id, episode, worker, **kwargs):
+            if agent_id != _DUMMY_AGENT_ID:
+                return policy_ids[agent_name_ls.index(agent_id)]
+            else:
+                return "policy_" + teams_name[0]
 
     #########################
     ### experiment config ###
@@ -166,7 +184,8 @@ def run_cc(exp_info: Dict, env, model, stop=None):
         "seed": int(exp_info["seed"]),
         "env": exp_info["env"] + "_" + exp_info["env_args"]["map_name"],
         "num_gpus_per_worker": exp_info.get("num_gpus_per_worker", 0),
-        "num_gpus": exp_info["num_gpus"],
+        "num_cpus_per_worker": exp_info.get("num_cpus_per_worker", 1),
+        "num_gpus": exp_info.get("num_gpus", 0),
         "num_workers": exp_info["num_workers"],
         "num_envs_per_worker": exp_info.get("num_envs_per_worker", 1),
         "multiagent": {

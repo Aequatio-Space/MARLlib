@@ -18,7 +18,7 @@ from run_configs.mcs_configs_python import run_config, PROJECT_NAME
 from envs.crowd_sim.crowd_sim import (AOI_METRIC_NAME, DATA_METRIC_NAME,
                                       ENERGY_METRIC_NAME, COVERAGE_METRIC_NAME, MAIN_METRIC_NAME)
 
-logger = logging.getLogger(__name__).setLevel(logging.DEBUG)
+logger = logging.getLogger(__name__).setLevel(logging.ERROR)
 
 
 @DeveloperAPI
@@ -194,6 +194,9 @@ def build_wandb_trainer(
             wandb.define_metric(DATA_METRIC_NAME, summary="max")
             wandb.define_metric(MAIN_METRIC_NAME, summary="max")
             wandb.define_metric(AOI_METRIC_NAME, summary="min")
+
+        def __del__(self):
+            wandb.finish()
 
         @override(Trainer)
         def step(self):

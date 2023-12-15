@@ -108,6 +108,9 @@ if __name__ == "__main__":
     # utils
     do_link("rllib/utils/exploration/ornstein_uhlenbeck_noise.py", force=args.yes,
             local_path="./rllib/utils/exploration/ornstein_uhlenbeck_noise.py", packagent=ray)
+    # VectorEnv
+    do_link("rllib/env/base_env.py", force=args.yes,
+            local_path="./rllib/env/base_env.py", packagent=ray)
 
     if args.pommerman:
         import pommerman

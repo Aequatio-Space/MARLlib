@@ -104,6 +104,7 @@ def run_mappo(model: Any, exp: Dict, run: Dict, env: Dict,
     config.update(run)
     config['logging_config'] = exp['logging_config']
     config['model']['custom_model_config']['logging_config'] = exp['logging_config']
+    config['custom_vector_env'] = exp['custom_vector_env']
     if 'track' in config:
         del config['track']
     algorithm = exp["algorithm"]
