@@ -112,6 +112,9 @@ if __name__ == "__main__":
     do_link("rllib/env/base_env.py", force=args.yes,
             local_path="./rllib/env/base_env.py", packagent=ray)
 
+    do_link("rllib/evaluation/episode.py", force=args.yes,
+            local_path="./rllib/evaluation/episode.py", packagent=ray)
+
     if args.pommerman:
         import pommerman
 
