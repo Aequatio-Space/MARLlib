@@ -1,5 +1,5 @@
 # MIT License
-
+import ray
 # Copyright (c) 2023 Replicable-MARL
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -25,6 +25,7 @@ import os
 import collections
 from typing import Dict
 
+
 algo_type_dict = {
     "IL": ["ia2c", "iddpg", "itrpo", "ippo"],
     "VD": ["vda2c", "vdppo", "facmac", "iql", "vdn", "qmix"],
@@ -46,7 +47,7 @@ def dict_update(target_dict: Dict, new_dict: Dict, check: bool = False) -> Dict:
     if new_dict and isinstance(new_dict, dict):
         for key, value in new_dict.items():
             if check:
-                if key not in target_dict:
+                if key not in target_dict and key != "env_params":
                     raise ValueError("{} illegal, not in default config".format(key))
                 else:  # update
                     target_dict[key] = value
@@ -105,3 +106,4 @@ def get_model_config(model_arch: str) -> Dict:
         except yaml.YAMLError as exc:
             assert False, "{}.yaml error: {}".format(model_arch, exc)
     return config_dict
+

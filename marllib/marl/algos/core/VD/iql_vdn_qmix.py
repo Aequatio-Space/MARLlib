@@ -34,15 +34,17 @@ from ray.rllib.utils.metrics.learner_info import LEARNER_STATS_KEY
 from ray.rllib.models.catalog import ModelCatalog
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.agents.qmix.qmix_policy import _mac, _validate, _unroll_mac
-from ray.rllib.agents.dqn.dqn import GenericOffPolicyTrainer
+from ray.rllib.agents.dqn.dqn import validate_config, execution_plan
 from ray.rllib.agents.qmix.qmix import DEFAULT_CONFIG
 from ray.rllib.policy.rnn_sequencing import chop_into_sequences
 
+from marllib.marl.algos.wandb_trainers import WandbSimpleQTrainer
 from marllib.marl.models.zoo.rnn.jointQ_rnn import JointQRNN
 from marllib.marl.models.zoo.mlp.jointQ_mlp import JointQMLP
 
 from marllib.marl.models.zoo.mixer import QMixer, VDNMixer
 from marllib.marl.algos.utils.episode_execution_plan import episode_execution_plan
+
 
 # original _unroll_mac for next observation is different from Pymarl.
 # thus we provide a new JointQLoss here
@@ -478,10 +480,14 @@ class JointQPolicy(Policy):
         return group_rewards
 
     def _device_dict(self, state_dict):
-        return {
-            k: torch.as_tensor(v, device=self.device)
-            for k, v in state_dict.items()
-        }
+        device_dict = {}
+        for k, v in state_dict.items():
+            # is_writable = v.flags.writeable
+            # if is_writable:
+            #     device_dict[k] = torch.as_tensor(v, device=self.device)
+            # else:
+            device_dict[k] = torch.tensor(v).to(device=self.device)
+        return device_dict
 
     @staticmethod
     def _cpu_dict(state_dict):
@@ -529,6 +535,18 @@ class JointQPolicy(Policy):
         else:
             state = None
         return obs, action_mask, state
+
+
+GenericOffPolicyTrainer = WandbSimpleQTrainer.with_updates(
+    name="GenericOffPolicyTrainer",
+    # No Policy preference.
+    default_policy=None,
+    get_policy_class=None,
+    # Use DQN's config and exec. plan as base for
+    # all other OffPolicy algos.
+    default_config=DEFAULT_CONFIG,
+    validate_config=validate_config,
+    execution_plan=execution_plan)
 
 
 JointQTrainer = GenericOffPolicyTrainer.with_updates(

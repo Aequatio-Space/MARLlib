@@ -26,12 +26,26 @@ from ray import tune
 from envs.crowd_sim.crowd_sim import teams_name
 from typing import Dict
 from ray.rllib.utils.framework import try_import_tf, try_import_torch
-from ray.rllib.env.base_env import _DUMMY_AGENT_ID
+from ray.rllib.env.base_env import dummy_agent_id
 from marllib.marl.algos.scripts import POlICY_REGISTRY
 from marllib.marl.common import recursive_dict_update, dict_update
+from marllib.marl.algos.utils.log_dir_util import path_to_temp
 
+tf1, tf, tfv = try_import_tf()
 torch, nn = try_import_torch()
 
+
+def setup_running(env, exp_info):
+    ray.init(local_mode=exp_info["local_mode"], num_gpus=exp_info["num_gpus"], _temp_dir=path_to_temp)
+    ########################
+    ### environment info ###
+    ########################
+    env_info = env.get_env_info()
+    map_name = exp_info['env_args']['map_name']
+    agent_name_ls = env.agents
+    env_info["agent_name_ls"] = agent_name_ls
+    env.close()
+    return agent_name_ls, env_info, map_name
 
 
 def restore_config_update(exp_info, run_config, stop_config):
@@ -58,23 +72,10 @@ def restore_config_update(exp_info, run_config, stop_config):
 
             stop_config = recursive_dict_update(stop_config, render_stop_config)
 
-
     return exp_info, run_config, stop_config, restore_config
 
-
 def run_cc(exp_info: Dict, env, model, stop=None):
-    ray.init(local_mode=exp_info["local_mode"], num_gpus=exp_info["num_gpus"],
-             # runtime_env={"env_vars": {"CUBLAS_WORKSPACE_CONFIG": ":4096:8"}}
-             )
-    ########################
-    ### environment info ###
-    ########################
-
-    env_info = env.get_env_info()
-    map_name = exp_info['env_args']['map_name']
-    agent_name_ls = env.agents
-    env_info["agent_name_ls"] = agent_name_ls
-    env.close()
+    agent_name_ls, env_info, map_name = setup_running(env, exp_info)
 
     ######################
     ### space checking ###
@@ -121,7 +122,6 @@ def run_cc(exp_info: Dict, env, model, stop=None):
             if not policy_mapping_info["all_agents_one_policy"]:
                 raise ValueError(
                     "in {}, policy can not be shared, change it to 1. group 2. individual".format(map_name))
-
             policies = {shared_policy_name}
             policy_mapping_fn = (
                 lambda agent_id, episode, **kwargs: shared_policy_name)
@@ -132,10 +132,9 @@ def run_cc(exp_info: Dict, env, model, stop=None):
                 groups
             }
             policy_ids = list(policies.keys())
-
             def policy_mapping_fn(agent_id, episode, worker, **kwargs):
-                if agent_id != _DUMMY_AGENT_ID:
-                    return "policy_" + agent_id.split("_")[0]
+                if agent_id != dummy_agent_id():
+                    return "policy_" + agent_id.split("_")[0] + "_"
                 else:
                     return "policy_" + teams_name[0]
 
@@ -152,7 +151,7 @@ def run_cc(exp_info: Dict, env, model, stop=None):
         policy_ids = list(policies.keys())
 
         def policy_mapping_fn(agent_id, episode, worker, **kwargs):
-            if agent_id != _DUMMY_AGENT_ID:
+            if agent_id != dummy_agent_id():
                 return policy_ids[agent_name_ls.index(agent_id)]
             else:
                 return "policy_" + teams_name[0]
@@ -171,7 +170,7 @@ def run_cc(exp_info: Dict, env, model, stop=None):
         policy_ids = list(policies.keys())
 
         def policy_mapping_fn(agent_id, episode, worker, **kwargs):
-            if agent_id != _DUMMY_AGENT_ID:
+            if agent_id != dummy_agent_id():
                 return policy_ids[agent_name_ls.index(agent_id)]
             else:
                 return "policy_" + teams_name[0]
@@ -196,8 +195,11 @@ def run_cc(exp_info: Dict, env, model, stop=None):
         "evaluation_interval": exp_info["evaluation_interval"],
         "simple_optimizer": False,  # force using better optimizer
         "track": exp_info.get("track", False),
+        "logging_config": exp_info.get("logging_config", {}),
         "remote_worker_envs": exp_info.get("remote_worker_envs", False),
     }
+    if "custom_vector_env" in exp_info:
+        run_config["custom_vector_env"] = exp_info["custom_vector_env"]
 
     stop_config = {
         "episode_reward_mean": exp_info["stop_reward"],
@@ -215,7 +217,6 @@ def run_cc(exp_info: Dict, env, model, stop=None):
 
     results = POlICY_REGISTRY[exp_info["algorithm"]](model, exp_info, run_config, env_info, stop_config,
                                                      restore_config)
-
     ray.shutdown()
 
     return results

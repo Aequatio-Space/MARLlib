@@ -41,7 +41,7 @@ from ray.rllib.agents.ppo.ppo_torch_policy import PPOTorchPolicy, KLCoeffMixin
 from ray.rllib.policy.torch_policy import LearningRateSchedule, EntropyCoeffSchedule
 from marllib.marl.algos.utils.setup_utils import setup_torch_mixins
 from marllib.marl.algos.utils.centralized_critic_hetero import trpo_post_process
-
+from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from marllib.marl.algos.utils.trust_regions import TrustRegionUpdator
 
 from ray.rllib.examples.centralized_critic import CentralizedValueMixin
@@ -182,7 +182,7 @@ def get_policy_class_trpo(config_):
         return TRPOTorchPolicy
 
 
-TRPOTrainer = PPOTrainer.with_updates(
+TRPOTrainer = WandbPPOTrainer.with_updates(
     name="TRPOTrainer",
     default_policy=None,
     get_policy_class=get_policy_class_trpo,

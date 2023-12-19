@@ -114,27 +114,27 @@ class TrustRegionUpdator:
         self.stored_actor_parameters = self.actor_parameters
 
     def recovery_actor_params_to_before_linear_search(self):
-        stored_actor_parameters = flat_params(self.stored_actor_parameters)
+        stored_actor_parameters = flat_params(self.stored_actor_parameters, self.device)
         self.set_actor_params(stored_actor_parameters)
 
     def reset_actor_params(self):
-        initialized_actor_parameters = flat_params(self.model.actor_initialized_parameters)
+        initialized_actor_parameters = flat_params(self.model.actor_initialized_parameters, self.device)
         self.set_actor_params(initialized_actor_parameters)
 
     def fisher_vector_product(self, p):
         p.detach()
         kl = self.kl.mean()
         kl_grads = torch.autograd.grad(kl, self.actor_parameters, create_graph=True, allow_unused=True)
-        kl_grads = flat_grad(kl_grads)
+        kl_grads = flat_grad(kl_grads, self.device)
         kl_grad_p = (kl_grads * p).sum()
         kl_hessian_p = torch.autograd.grad(kl_grad_p, self.actor_parameters, allow_unused=True)
-        kl_hessian_p = flat_hessian(kl_hessian_p)
+        kl_hessian_p = flat_hessian(kl_hessian_p, self.device)
         return kl_hessian_p + 0.1 * p
 
     def conjugate_gradients(self, b, nsteps, residual_tol=1e-10):
         x = torch.zeros(b.size()).to(device=self.device)
-        r = b.clone()
-        p = b.clone()
+        r = b.clone().to(device=self.device)
+        p = b.clone().to(device=self.device)
         rdotr = torch.dot(r, r)
         for i in range(nsteps):
             _Avp = self.fisher_vector_product(p)
@@ -160,7 +160,7 @@ class TrustRegionUpdator:
 
         new_params = (
                 parameters_to_vector(self.critic_parameters) - flat_grad(
-            critic_loss_grad) * TrustRegionUpdator.critic_lr
+                    critic_loss_grad) * TrustRegionUpdator.critic_lr, self.device
         )
 
         vector_to_parameters(new_params, self.critic_parameters)
@@ -170,7 +170,7 @@ class TrustRegionUpdator:
     def update_actor(self, policy_loss):
 
         loss_grad = torch.autograd.grad(policy_loss, self.actor_parameters, allow_unused=True, retain_graph=True)
-        pol_grad = flat_grad(loss_grad)
+        pol_grad = flat_grad(loss_grad, self.device)
         step_dir = self.conjugate_gradients(
             b=pol_grad.data,
             nsteps=10,
@@ -180,7 +180,7 @@ class TrustRegionUpdator:
         scala = 0 if fisher_norm < 0 else torch.sqrt(2 * self.kl_threshold / (fisher_norm + 1e-8))
         full_step = scala * step_dir
         loss = policy_loss.data.cpu().numpy()
-        params = flat_grad(self.actor_parameters)
+        params = flat_grad(self.actor_parameters, self.device)
         self.store_current_actor_params()
 
         expected_improve = pol_grad.dot(full_step).item()

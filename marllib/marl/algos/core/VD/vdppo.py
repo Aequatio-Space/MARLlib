@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from ray.rllib.models.action_dist import ActionDistribution
 from typing import List, Type, Union
 from ray.rllib.evaluation.postprocessing import Postprocessing
@@ -158,7 +159,7 @@ def get_policy_class_vdppo(config_):
         return VDPPOTorchPolicy
 
 
-VDPPOTrainer = PPOTrainer.with_updates(
+VDPPOTrainer = WandbPPOTrainer.with_updates(
     name="VDPPOTrainer",
     default_policy=None,
     get_policy_class=get_policy_class_vdppo,

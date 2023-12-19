@@ -25,7 +25,7 @@ Implement HAPPO algorithm based on Rlib original PPO.
 __author__: minquan
 __data__: March-29-2022
 """
-
+from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from typing import List, Type, Union
 from ray.rllib.models.torch.torch_action_dist import TorchDistributionWrapper
 from ray.rllib.policy.policy import Policy
@@ -198,7 +198,7 @@ def get_policy_class_happo(ppo_with_critic):
     return __inner
 
 
-HAPPOTrainer = lambda ppo_with_critic: PPOTrainer.with_updates(
+HAPPOTrainer = lambda ppo_with_critic: WandbPPOTrainer.with_updates(
     name="HAPPOTrainer",
     default_policy=None,
     get_policy_class=get_policy_class_happo(ppo_with_critic),

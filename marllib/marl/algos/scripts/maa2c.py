@@ -90,7 +90,10 @@ def run_maa2c(model: Any, exp: Dict, run: Dict, env: Dict,
     arch = exp["model_arch_args"]["core_arch"]
     RUNNING_NAME = '_'.join([algorithm, arch, map_name])
     model_path = restore_model(restore, exp)
-
+    if run['track']:
+        logger = None
+    else:
+        logger = CLIReporter(max_report_frequency=5)
     results = tune.run(MAA2CTrainer,
                        name=RUNNING_NAME,
                        checkpoint_at_end=exp['checkpoint_end'],
@@ -99,7 +102,7 @@ def run_maa2c(model: Any, exp: Dict, run: Dict, env: Dict,
                        stop=stop,
                        config=config,
                        verbose=1,
-                       progress_reporter=CLIReporter(),
+                       progress_reporter=logger,
                        local_dir=available_local_dir if exp["local_dir"] == "" else exp["local_dir"])
 
     return results

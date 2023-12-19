@@ -33,7 +33,7 @@ from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.torch_ops import convert_to_torch_tensor
 from typing import Dict
 from marllib.marl.algos.utils.centralized_critic import CentralizedValueMixin, centralized_critic_postprocessing
-
+from marllib.marl.algos.wandb_trainers import WandbA2CTrainer
 torch, nn = try_import_torch()
 
 ############
@@ -130,7 +130,7 @@ def get_policy_class_coma(config_):
         return COMATorchPolicy
 
 
-COMATrainer = A2CTrainer.with_updates(
+COMATrainer = WandbA2CTrainer.with_updates(
     name="COMATrainer",
     default_policy=None,
     get_policy_class=get_policy_class_coma,

@@ -241,6 +241,9 @@ class _Algo:
         self.config_dict = None
         self.common_config = None
 
+    def __str__(self):
+        return self.name
+
     def __call__(self, hyperparam_source: str, **algo_params):
         """
         Args:

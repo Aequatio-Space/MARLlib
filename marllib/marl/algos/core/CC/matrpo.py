@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.agents.ppo.ppo_torch_policy import PPOTorchPolicy, KLCoeffMixin
 from ray.rllib.agents.ppo.ppo import PPOTrainer, DEFAULT_CONFIG as PPO_CONFIG
@@ -174,7 +175,7 @@ def get_policy_class_mappo(config_):
         return MATRPOTorchPolicy
 
 
-MATRPOTrainer = PPOTrainer.with_updates(
+MATRPOTrainer = WandbPPOTrainer.with_updates(
     name="MATRPOTrainer",
     default_policy=None,
     get_policy_class=get_policy_class_mappo,

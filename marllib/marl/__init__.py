@@ -1,5 +1,4 @@
 # MIT License
-
 # Copyright (c) 2023 Replicable-MARL
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -157,77 +156,6 @@ def make_env(
     return env, env_config
 
 
-def build_model(
-        environment: Tuple[MultiAgentEnv, Dict],
-        algorithm: str,
-        model_preference: Dict,
-) -> Tuple[Any, Dict]:
-    """
-    construct the model
-    Args:
-        :param environment: name of the environment
-        :param algorithm: name of the algorithm
-        :param model_preference:  parameters that can be pass to the model for customizing the model
-
-    Returns:
-        Tuple[Any, Dict]: model class & model configuration
-    """
-
-    if algorithm.name in ["iddpg", "facmac", "maddpg"]:
-        if model_preference["core_arch"] in ["gru", "lstm"]:
-            model_class = DDPGSeriesRNN
-        else:
-            model_class = DDPGSeriesMLP
-
-    elif algorithm.name in ["qmix", "vdn", "iql"]:
-        if model_preference["core_arch"] in ["gru", "lstm"]:
-            model_class = JointQRNN
-        else:
-            model_class = JointQMLP
-
-    else:
-        if algorithm.algo_type == "IL":
-            if model_preference["core_arch"] in ["gru", "lstm"]:
-                model_class = BaseRNN
-            else:
-                model_class = BaseMLP
-        elif algorithm.algo_type == "CC":
-            if model_preference["core_arch"] in ["gru", "lstm"]:
-                model_class = CentralizedCriticRNN
-            else:
-                model_class = CentralizedCriticMLP
-        else:  # VD
-            if model_preference["core_arch"] in ["gru", "lstm"]:
-                model_class = ValueDecompRNN
-            else:
-                model_class = ValueDecompMLP
-
-    if model_preference["core_arch"] in ["gru", "lstm"]:
-        model_config = get_model_config("rnn")
-    elif model_preference["core_arch"] in ["mlp"]:
-        model_config = get_model_config("mlp")
-    else:
-        raise NotImplementedError("{} not supported agent model arch".format(model_preference["core_arch"]))
-
-    if len(environment[0].observation_space.spaces["obs"].shape) == 1:
-        encoder = "fc_encoder"
-    else:
-        encoder = "cnn_encoder"
-
-    # encoder config
-    encoder_arch_config = get_model_config(encoder)
-    model_config = recursive_dict_update(model_config, encoder_arch_config)
-    model_config = recursive_dict_update(model_config, {"model_arch_args": model_preference})
-
-    if algorithm.algo_type == "VD":
-        mixer_arch_config = get_model_config("mixer")
-        model_config = recursive_dict_update(model_config, mixer_arch_config)
-        if "mixer_arch" in model_preference:
-            recursive_dict_update(model_config, {"model_arch_args": model_preference})
-
-    return model_class, model_config
-
-
 class _Algo:
     """An algorithm tool class
     :param str algo_name: the algorithm name
@@ -336,6 +264,76 @@ class _Algo:
 
         self.fit(env, model, stop, **running_params)
 
+
+def build_model(
+        environment: Tuple[MultiAgentEnv, Dict],
+        algorithm: _Algo,
+        model_preference: Dict,
+) -> Tuple[Any, Dict]:
+    """
+    construct the model
+    Args:
+        :param environment: name of the environment
+        :param algorithm: name of the algorithm
+        :param model_preference:  parameters that can be pass to the model for customizing the model
+
+    Returns:
+        Tuple[Any, Dict]: model class & model configuration
+    """
+
+    if algorithm.name in ["iddpg", "facmac", "maddpg"]:
+        if model_preference["core_arch"] in ["gru", "lstm"]:
+            model_class = DDPGSeriesRNN
+        else:
+            model_class = DDPGSeriesMLP
+
+    elif algorithm.name in ["qmix", "vdn", "iql"]:
+        if model_preference["core_arch"] in ["gru", "lstm"]:
+            model_class = JointQRNN
+        else:
+            model_class = JointQMLP
+
+    else:
+        if algorithm.algo_type == "IL":
+            if model_preference["core_arch"] in ["gru", "lstm"]:
+                model_class = BaseRNN
+            else:
+                model_class = BaseMLP
+        elif algorithm.algo_type == "CC":
+            if model_preference["core_arch"] in ["gru", "lstm"]:
+                model_class = CentralizedCriticRNN
+            else:
+                model_class = CentralizedCriticMLP
+        else:  # VD
+            if model_preference["core_arch"] in ["gru", "lstm"]:
+                model_class = ValueDecompRNN
+            else:
+                model_class = ValueDecompMLP
+
+    if model_preference["core_arch"] in ["gru", "lstm"]:
+        model_config = get_model_config("rnn")
+    elif model_preference["core_arch"] in ["mlp"]:
+        model_config = get_model_config("mlp")
+    else:
+        raise NotImplementedError("{} not supported agent model arch".format(model_preference["core_arch"]))
+
+    if len(environment[0].observation_space.spaces["obs"].shape) == 1:
+        encoder = "fc_encoder"
+    else:
+        encoder = "cnn_encoder"
+
+    # encoder config
+    encoder_arch_config = get_model_config(encoder)
+    model_config = recursive_dict_update(model_config, encoder_arch_config)
+    model_config = recursive_dict_update(model_config, {"model_arch_args": model_preference})
+
+    if algorithm.algo_type == "VD":
+        mixer_arch_config = get_model_config("mixer")
+        model_config = recursive_dict_update(model_config, mixer_arch_config)
+        if "mixer_arch" in model_preference:
+            recursive_dict_update(model_config, {"model_arch_args": model_preference})
+
+    return model_class, model_config
 
 class _AlgoManager:
     def __init__(self):

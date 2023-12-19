@@ -29,7 +29,7 @@ from ray.rllib.agents.a3c.a3c_torch_policy import A3CTorchPolicy
 from ray.rllib.agents.a3c.a2c import A2C_DEFAULT_CONFIG as A2C_CONFIG, A2CTrainer
 from ray.rllib.policy.sample_batch import SampleBatch
 from marllib.marl.algos.utils.centralized_critic import CentralizedValueMixin, centralized_critic_postprocessing
-
+from marllib.marl.algos.wandb_trainers import WandbA2CTrainer
 
 #############
 ### MAA2C ###
@@ -82,7 +82,7 @@ def get_policy_class_maa2c(config_):
         return MAA2CTorchPolicy
 
 
-MAA2CTrainer = A2CTrainer.with_updates(
+MAA2CTrainer = WandbA2CTrainer.with_updates(
     name="MAA2CTrainer",
     default_policy=None,
     get_policy_class=get_policy_class_maa2c,

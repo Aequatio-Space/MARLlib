@@ -68,6 +68,7 @@ def run_joint_q(model: Any, exp: Dict, run: Dict, env: Dict,
     optimizer = _param["optimizer"]
     back_up_config = merge_dicts(exp, env)
     back_up_config.pop("algo_args")  # clean for grid_search
+    rollout_fragment_length = _param['rollout_fragment_length'] if 'rollout_fragment_length' in _param else 1
 
     mixer_dict = {
         "qmix": "qmix",
@@ -86,7 +87,7 @@ def run_joint_q(model: Any, exp: Dict, run: Dict, env: Dict,
 
     JointQ_Config.update(
         {
-            "rollout_fragment_length": 1,
+            "rollout_fragment_length": rollout_fragment_length,
             "buffer_size": buffer_size * episode_limit,  # in timesteps
             "train_batch_size": train_batch_episode,  # in sequence
             "target_network_update_freq": episode_limit * target_network_update_frequency,  # in timesteps

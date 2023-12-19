@@ -25,7 +25,7 @@ from ray import tune
 from ray.tune.utils import merge_dicts
 from ray.tune import CLIReporter
 from ray.rllib.models import ModelCatalog
-from marllib.marl.algos.core.CC.mappo import MAPPOTrainer, MAPPOWandbTrainer
+from marllib.marl.algos.core.CC.mappo import MAPPOTrainer
 from marllib.marl.algos.utils.log_dir_util import available_local_dir
 from marllib.marl.algos.utils.setup_utils import AlgVar
 from marllib.marl.algos.scripts.coma import restore_model
@@ -80,6 +80,7 @@ def run_mappo(model: Any, exp: Dict, run: Dict, env: Dict,
     num_sgd_iter = _param["num_sgd_iter"]
     vf_loss_coeff = _param["vf_loss_coeff"]
     entropy_coeff = _param["entropy_coeff"]
+    grad_clip = _param["grad_clip"] if "grad_clip" in _param else 0.5
     back_up_config = merge_dicts(exp, env)
     back_up_config.pop("algo_args")  # clean for grid_search
 
@@ -101,25 +102,19 @@ def run_mappo(model: Any, exp: Dict, run: Dict, env: Dict,
             "custom_model": "Centralized_Critic_Model",
             "custom_model_config": back_up_config,
         },
-        "grad_clip": _param["grad_clip"],
+        "grad_clip": grad_clip,
     }
     config.update(run)
-    config['logging_config'] = exp['logging_config']
-    config['model']['custom_model_config']['logging_config'] = exp['logging_config']
-    config['custom_vector_env'] = exp['custom_vector_env']
-    if 'track' in config:
-        del config['track']
     algorithm = exp["algorithm"]
     map_name = exp["env_args"]["map_name"]
     arch = exp["model_arch_args"]["core_arch"]
     RUNNING_NAME = '_'.join([algorithm, arch, map_name])
     model_path = restore_model(restore, exp)
-    my_trainer = MAPPOWandbTrainer
     if run['track']:
         logger = None
     else:
         logger = CLIReporter(max_report_frequency=5)
-    results = tune.run(my_trainer,
+    results = tune.run(MAPPOTrainer,
                        name=RUNNING_NAME,
                        checkpoint_at_end=exp['checkpoint_end'],
                        checkpoint_freq=exp['checkpoint_freq'],
@@ -127,7 +122,6 @@ def run_mappo(model: Any, exp: Dict, run: Dict, env: Dict,
                        stop=stop,
                        config=config,
                        verbose=1,
-                       reuse_actors=True,
                        progress_reporter=logger,
                        callbacks=exp.get("callbacks", []),
                        local_dir=available_local_dir if exp["local_dir"] == "" else exp["local_dir"])

@@ -133,7 +133,10 @@ def run_happo(model: Any, exp: Dict, run: Dict, env: Dict,
     model_path = restore_model(restore, exp)
 
     _HAPPOTrainer = HAPPOTrainer(PPO_CONFIG)
-
+    if run['track']:
+        logger = None
+    else:
+        logger = CLIReporter(max_report_frequency=5)
     results = tune.run(_HAPPOTrainer,
                        name=RUNNING_NAME,
                        checkpoint_at_end=exp['checkpoint_end'],
@@ -142,7 +145,8 @@ def run_happo(model: Any, exp: Dict, run: Dict, env: Dict,
                        stop=stop,
                        config=config,
                        verbose=1,
-                       progress_reporter=CLIReporter(),
+                       progress_reporter=logger,
+                       callbacks=exp.get("callbacks", []),
                        local_dir=available_local_dir if exp["local_dir"] == "" else exp["local_dir"])
 
     return results

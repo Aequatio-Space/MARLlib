@@ -25,29 +25,29 @@ from ray.rllib.utils.framework import try_import_torch
 torch, nn = try_import_torch()
 
 
-def flat_grad(grads):
+def flat_grad(grads: list[torch.Tensor], device):
     grad_flatten = []
     for grad in grads:
         if grad is None:
             continue
         grad_flatten.append(grad.reshape(-1))
-    grad_flatten = torch.cat(grad_flatten)
+    grad_flatten = torch.cat(grad_flatten).to(device)
     return grad_flatten
 
 
-def flat_hessian(hessians):
+def flat_hessian(hessians, device):
     hessians_flatten = []
     for hessian in hessians:
         if hessian is None:
             continue
         hessians_flatten.append(hessian.contiguous().view(-1))
-    hessians_flatten = torch.cat(hessians_flatten).data
+    hessians_flatten = torch.cat(hessians_flatten).to(device).data
     return hessians_flatten
 
 
-def flat_params(parameters):
+def flat_params(parameters, device):
     params = []
     for param in parameters:
         params.append(param.data.view(-1))
-    params_flatten = torch.cat(params)
+    params_flatten = torch.cat(params).to(device)
     return params_flatten

@@ -30,3 +30,7 @@ __total, __used, __free = shutil.disk_usage(path_to_log)
 
 available_local_dir = os.path.join(path_to_log, sub_dir_name) \
     if __used / __total <= 0.95 else os.path.join("/mnt", sub_dir_name)
+
+path_to_temp = os.path.join("/workspace", "saved_data", "tmp", "ray")
+__total, __used, __free = shutil.disk_usage(path_to_temp)
+path_to_temp = path_to_temp if __used / __total <= 0.95 else os.path.join("/tmp", "ray")

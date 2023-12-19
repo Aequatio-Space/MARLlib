@@ -30,6 +30,9 @@ class TestBaseOnMPE(unittest.TestCase):
     #############
     ### model ###
     #############
+    def tearDown(self):
+        if ray.is_initialized():
+            ray.shutdown()
 
     def test_a01_hatrpo_hacc_mlp(self):
         env = marl.make_env(environment_name="mpe", map_name="simple_spread", force_coop=True)

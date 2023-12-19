@@ -1,4 +1,5 @@
 import concurrent.futures
+import os
 from argparse import Namespace
 from functools import partial
 import logging
@@ -119,6 +120,8 @@ def build_wandb_trainer(
         _policy_class = default_policy
 
         def __init__(self, config: Dict = None, env=None, logger_creator=None):
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+            # print(os.environ["CUBLAS_WORKSPACE_CONFIG"])
             # print(f"common: {COMMON_CONFIG}")
             # print(f"pass_in: {config}")
             self.logging_config = config.pop("logging_config")
@@ -182,12 +185,12 @@ def build_wandb_trainer(
                 after_init(self)
 
         def setup_wandb(self, config):
-            if self.logging_config is None:
+            if not self.logging_config:
                 return
             wandb.init(project=PROJECT_NAME, name=self.logging_config['expr_name'], group=self.logging_config['group'],
                        tags=[self.logging_config['dataset']] + self.logging_config['tag'] if self.logging_config[
                                                                                                  'tag'] is not None else [],
-                       config=config, dir=self.logging_config['logging_dir'])
+                       config=config, dir=self.logging_config['logging_dir'], resume=self.logging_config['resume'])
             # prefix = 'env/'
             wandb.define_metric(COVERAGE_METRIC_NAME, summary="max")
             wandb.define_metric(ENERGY_METRIC_NAME, summary="min")

@@ -22,35 +22,27 @@
 
 import ray
 import gym
+
+from envs.crowd_sim.crowd_sim import teams_name
 from gym.spaces import Dict as GymDict, Discrete, Tuple
 from ray.tune import register_env
-from ray import tune
 from ray.rllib.utils.framework import try_import_tf, try_import_torch
+from ray.rllib.env.base_env import dummy_agent_id, dummy_group_id
 from marllib.marl.algos.scripts import POlICY_REGISTRY
 from marllib.envs.global_reward_env import COOP_ENV_REGISTRY as ENV_REGISTRY
-from marllib.marl.common import recursive_dict_update, dict_update
-from marllib.marl.algos.run_cc import restore_config_update
+from marllib.marl.common import dict_update
+from marllib.marl.algos.run_cc import restore_config_update, setup_running
 
 tf1, tf, tfv = try_import_tf()
 torch, nn = try_import_torch()
 
 
 def run_vd(exp_info, env, model, stop=None):
-    ray.init(local_mode=exp_info["local_mode"], num_gpus=exp_info["num_gpus"])
+    agent_name_ls, env_info, map_name = setup_running(env, exp_info)
 
-    ########################
-    ### environment info ###
-    ########################
-
-    env_info = env.get_env_info()
-    map_name = exp_info['env_args']['map_name']
-    agent_name_ls = env.agents
-    env_info["agent_name_ls"] = agent_name_ls
-    env.close()
-
-    ###################
-    ### space check ###
-    ###################
+    ######################
+    ### space checking ###
+    ######################
 
     action_discrete = isinstance(env_info["space_act"], gym.spaces.Discrete)
     action_multi_discrete = isinstance(env_info["space_act"], gym.spaces.MultiDiscrete)
@@ -100,8 +92,7 @@ def run_vd(exp_info, env, model, stop=None):
             act_space = Tuple([space_act] * n_agents)
             if not policy_mapping_info["all_agents_one_policy"]:
                 raise ValueError("in {}, policy can not be shared".format(map_name))
-            grouping = {"group_all_": agent_name_ls}
-
+            grouping = {dummy_group_id(): agent_name_ls}
         elif exp_info["share_policy"] == "group":
             groups = policy_mapping_info["team_prefix"]
             if len(groups) == 1:
@@ -109,7 +100,7 @@ def run_vd(exp_info, env, model, stop=None):
                 act_space = Tuple([space_act] * n_agents)
                 if not policy_mapping_info["all_agents_one_policy"]:
                     raise ValueError("in {}, policy can not be shared".format(map_name))
-                grouping = {"group_all_": agent_name_ls}
+                grouping = {dummy_group_id(): agent_name_ls}
             else:
                 raise ValueError("joint Q learning does not support group function")
         elif exp_info["share_policy"] == "individual":
@@ -154,8 +145,12 @@ def run_vd(exp_info, env, model, stop=None):
                     groups
                 }
                 policy_ids = list(policies.keys())
-                policy_mapping_fn = tune.function(
-                    lambda agent_id: "policy_{}_".format(agent_id.split("_")[0]))
+
+                def policy_mapping_fn(agent_id, episode, worker, **kwargs):
+                    if agent_id != dummy_agent_id():
+                        return "policy_" + agent_id.split("_")[0] + "_"
+                    else:
+                        return "policy_" + teams_name[0]
 
         elif exp_info["share_policy"] == "individual":
             if not policy_mapping_info["one_agent_one_policy"]:
@@ -166,8 +161,12 @@ def run_vd(exp_info, env, model, stop=None):
                 range(env_info["num_agents"])
             }
             policy_ids = list(policies.keys())
-            policy_mapping_fn = tune.function(
-                lambda agent_id: policy_ids[agent_name_ls.index(agent_id)])
+
+            def policy_mapping_fn(agent_id, episode, worker, **kwargs):
+                if agent_id != dummy_agent_id():
+                    return policy_ids[agent_name_ls.index(agent_id)]
+                else:
+                    return "policy_" + teams_name[0]
 
         else:
             raise ValueError("wrong share_policy {}".format(exp_info["share_policy"]))
@@ -179,17 +178,24 @@ def run_vd(exp_info, env, model, stop=None):
     run_config = {
         "seed": int(exp_info["seed"]),
         "env": env_reg_name,
-        "num_gpus_per_worker": exp_info["num_gpus_per_worker"],
-        "num_gpus": exp_info["num_gpus"],
+        "num_gpus_per_worker": exp_info.get("num_gpus_per_worker", 0),
+        "num_cpus_per_worker": exp_info.get("num_cpus_per_worker", 1),
         "num_workers": exp_info["num_workers"],
+        "num_envs_per_worker": exp_info.get("num_envs_per_worker", 1),
         "multiagent": {
             "policies": policies,
             "policy_mapping_fn": policy_mapping_fn
         },
         "framework": exp_info["framework"],
         "evaluation_interval": exp_info["evaluation_interval"],
-        "simple_optimizer": False  # force using better optimizer
+        "simple_optimizer": False,  # force using better optimizer
+        "track": exp_info.get("track", False),
+        "logging_config": exp_info.get("logging_config", {}),
+        "remote_worker_envs": exp_info.get("remote_worker_envs", False),
     }
+
+    if "custom_vector_env" in exp_info:
+        run_config["custom_vector_env"] = exp_info["custom_vector_env"]
 
     stop_config = {
         "episode_reward_mean": exp_info["stop_reward"],
@@ -210,4 +216,3 @@ def run_vd(exp_info, env, model, stop=None):
     ray.shutdown()
 
     return results
-

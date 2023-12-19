@@ -27,6 +27,7 @@ __data__: May-15
 """
 
 import logging
+from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from typing import List, Type, Union
 from ray.rllib.models.torch.torch_action_dist import TorchDistributionWrapper
 from ray.rllib.policy.policy import Policy
@@ -214,7 +215,7 @@ def get_policy_class_hatrpo(config_):
         return HAPTRPOTorchPolicy
 
 
-HATRPOTrainer = PPOTrainer.with_updates(
+HATRPOTrainer = WandbPPOTrainer.with_updates(
     name="HATRPOTrainer",
     default_policy=None,
     get_policy_class=get_policy_class_hatrpo,

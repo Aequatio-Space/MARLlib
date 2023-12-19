@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from marllib.marl.algos.wandb_trainers import WandbA2CTrainer
 from ray.rllib.agents.a3c.a3c_torch_policy import A3CTorchPolicy
 from ray.rllib.agents.a3c.a2c import A2C_DEFAULT_CONFIG as A2C_CONFIG, A2CTrainer
 
@@ -39,7 +40,7 @@ def get_policy_class_ia2c(config_):
         return IA2CTorchPolicy
 
 
-IA2CTrainer = A2CTrainer.with_updates(
+IA2CTrainer = WandbA2CTrainer.with_updates(
     name="IA2CTrainer",
     default_policy=None,
     get_policy_class=get_policy_class_ia2c,

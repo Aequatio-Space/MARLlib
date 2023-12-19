@@ -22,29 +22,21 @@
 
 import ray
 import gym
+from envs.crowd_sim.crowd_sim import teams_name
 from ray import tune
 from ray.rllib.utils.framework import try_import_tf, try_import_torch
+from ray.rllib.env.base_env import _DUMMY_AGENT_ID
 from ray.rllib.policy.policy import PolicySpec
 from marllib.marl.algos.scripts import POlICY_REGISTRY
 from marllib.marl.common import recursive_dict_update, dict_update
-from marllib.marl.algos.run_cc import restore_config_update
+from marllib.marl.algos.run_cc import restore_config_update, setup_running
 
 tf1, tf, tfv = try_import_tf()
 torch, nn = try_import_torch()
 
 
 def run_il(exp_info, env, model, stop=None):
-    ray.init(local_mode=exp_info["local_mode"], num_gpus=exp_info["num_gpus"])
-
-    ########################
-    ### environment info ###
-    ########################
-
-    env_info = env.get_env_info()
-    map_name = exp_info['env_args']['map_name']
-    agent_name_ls = env.agents
-    env_info["agent_name_ls"] = agent_name_ls
-    env.close()
+    agent_name_ls, env_info, map_name = setup_running(env, exp_info)
 
     ######################
     ### space checking ###
@@ -78,7 +70,6 @@ def run_il(exp_info, env, model, stop=None):
     if exp_info["share_policy"] == "all":
         if not policy_mapping_info["all_agents_one_policy"]:
             raise ValueError("in {}, policy can not be shared".format(map_name))
-
         policies = {shared_policy_name}
         policy_mapping_fn = (
             lambda agent_id, episode, **kwargs: shared_policy_name)
@@ -99,8 +90,13 @@ def run_il(exp_info, env, model, stop=None):
                 groups
             }
             policy_ids = list(policies.keys())
-            policy_mapping_fn = tune.function(
-                lambda agent_id: "policy_{}_".format(agent_id.split("_")[0]))
+
+            def policy_mapping_fn(agent_id, episode, worker, **kwargs):
+                if agent_id != _DUMMY_AGENT_ID:
+                    return "policy_" + agent_id.split("_")[0] + "_"
+                else:
+                    return "policy_" + teams_name[0]
+
 
     elif exp_info["share_policy"] == "individual":
         if not policy_mapping_info["one_agent_one_policy"]:
@@ -110,9 +106,14 @@ def run_il(exp_info, env, model, stop=None):
             "policy_{}".format(i): (None, env_info["space_obs"], env_info["space_act"], {}) for i in
             range(env_info["num_agents"])
         }
+
         policy_ids = list(policies.keys())
-        policy_mapping_fn = tune.function(
-            lambda agent_id: policy_ids[agent_name_ls.index(agent_id)])
+
+        def policy_mapping_fn(agent_id, episode, worker, **kwargs):
+            if agent_id != _DUMMY_AGENT_ID:
+                return policy_ids[agent_name_ls.index(agent_id)]
+            else:
+                return "policy_" + teams_name[0]
 
     else:
         raise ValueError("wrong share_policy {}".format(exp_info["share_policy"]))
@@ -124,8 +125,8 @@ def run_il(exp_info, env, model, stop=None):
     run_config = {
         "seed": int(exp_info["seed"]),
         "env": exp_info["env"] + "_" + exp_info["env_args"]["map_name"],
-        "num_gpus_per_worker": exp_info["num_gpus_per_worker"],
-        "num_gpus": exp_info["num_gpus"],
+        "num_gpus_per_worker": exp_info.get("num_gpus_per_worker", 0),
+        "num_gpus": exp_info.get("num_gpus", 0),
         "num_workers": exp_info["num_workers"],
         "multiagent": {
             "policies": policies,
@@ -133,8 +134,13 @@ def run_il(exp_info, env, model, stop=None):
         },
         "framework": exp_info["framework"],
         "evaluation_interval": exp_info["evaluation_interval"],
-        "simple_optimizer": False  # force using better optimizer
+        "simple_optimizer": False,  # force using better optimizer
+        "track": exp_info.get("track", False),
+        "logging_config": exp_info.get("logging_config", {}),
+        "remote_worker_envs": exp_info.get("remote_worker_envs", False),
     }
+    if "custom_vector_env" in exp_info:
+        run_config["custom_vector_env"] = exp_info["custom_vector_env"]
 
     stop_config = {
         "episode_reward_mean": exp_info["stop_reward"],
@@ -155,4 +161,3 @@ def run_il(exp_info, env, model, stop=None):
     ray.shutdown()
 
     return results
-
