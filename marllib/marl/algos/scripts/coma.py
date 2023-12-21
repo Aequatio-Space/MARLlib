@@ -35,10 +35,12 @@ from ray.tune.analysis import ExperimentAnalysis
 def restore_model(restore: Dict, exp: Dict):
     if restore is not None:
         with open(restore["params_path"], 'r') as JSON:
-            raw_exp = json.load(JSON)
-            raw_exp = raw_exp["model"]["custom_model_config"]['model_arch_args']
+            data = json.load(JSON)
+            parsed_checkpoints = [json.loads(checkpoint) for checkpoint in data['checkpoints']]
+            checkpoint_arch = parsed_checkpoints[0]['_last_result']['config']['model']["custom_model_config"][
+                'model_arch_args']
             check_exp = exp['model_arch_args']
-            if check_exp != raw_exp:
+            if check_exp != checkpoint_arch:
                 raise ValueError("is not using the params required by the checkpoint model")
         model_path = restore["model_path"]
     else:

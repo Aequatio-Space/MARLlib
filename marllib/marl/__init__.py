@@ -29,12 +29,12 @@ from marllib.marl.models import BaseRNN, BaseMLP, CentralizedCriticRNN, Centrali
     ValueDecompMLP, JointQMLP, JointQRNN, DDPGSeriesRNN, DDPGSeriesMLP
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from ray.tune import register_env
-from copy import deepcopy
 from tabulate import tabulate
 from typing import Any, Dict, Tuple
 import yaml
 import os
 import sys
+import logging
 from copy import deepcopy
 
 SYSPARAMs = deepcopy(sys.argv)
@@ -146,7 +146,10 @@ def make_env(
     try:
         no_log_args['env_params'].pop("logging_config")
     except KeyError:
-        print("No logging config detected, continuing")
+        logging.debug("No logging config detected, continuing")
+    if 'env_params' in no_log_args:
+        no_log_args['env_params']['mock'] = True
+    logging.debug(f"full env_config: {env_config}")
     if env_config["force_coop"]:
         register_env(env_reg_name, lambda _: COOP_ENV_REGISTRY[env_config["env"]](env_config["env_args"]))
         env = COOP_ENV_REGISTRY[env_config["env"]](no_log_args)
@@ -334,6 +337,7 @@ def build_model(
             recursive_dict_update(model_config, {"model_arch_args": model_preference})
 
     return model_class, model_config
+
 
 class _AlgoManager:
     def __init__(self):

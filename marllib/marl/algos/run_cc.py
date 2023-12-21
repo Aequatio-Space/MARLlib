@@ -67,7 +67,7 @@ def restore_config_update(exp_info, run_config, stop_config):
             run_config = recursive_dict_update(run_config, render_config)
 
             render_stop_config = {
-                "training_iteration": 1,
+                "training_iteration": 0,
             }
 
             stop_config = recursive_dict_update(stop_config, render_stop_config)

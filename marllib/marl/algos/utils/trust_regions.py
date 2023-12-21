@@ -43,12 +43,12 @@ class TrustRegionUpdator:
     def __init__(self, model, dist_class, train_batch, adv_targ, initialize_policy_loss, initialize_critic_loss=None):
         self.model = model
         self.dist_class = dist_class
-        self.train_batch = train_batch
         self.adv_targ = adv_targ
         self.initialize_policy_loss = initialize_policy_loss
         self.initialize_critic_loss = initialize_critic_loss
         self.stored_actor_parameters = None
         self.device = get_device()
+        self.train_batch = train_batch.to(self.device)
 
     @property
     def actor_parameters(self):
@@ -61,6 +61,7 @@ class TrustRegionUpdator:
             curr_action_dist = self.dist_class(logits, self.model)
         except ValueError as e:
             print(e)
+            raise e
 
         logp_ratio = torch.exp(
             curr_action_dist.logp(self.train_batch[SampleBatch.ACTIONS]) -
@@ -158,10 +159,8 @@ class TrustRegionUpdator:
     def update_critic(self, critic_loss):
         critic_loss_grad = torch.autograd.grad(critic_loss, self.critic_parameters, allow_unused=True)
 
-        new_params = (
-                parameters_to_vector(self.critic_parameters) - flat_grad(
-                    critic_loss_grad) * TrustRegionUpdator.critic_lr, self.device
-        )
+        new_params = parameters_to_vector(self.critic_parameters) - flat_grad(
+            critic_loss_grad, self.device) * TrustRegionUpdator.critic_lr
 
         vector_to_parameters(new_params, self.critic_parameters)
 

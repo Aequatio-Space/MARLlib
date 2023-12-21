@@ -1,8 +1,8 @@
 env: "crowdsim"
 
 env_args:
-  num_cars: 3
-  num_drones: 3
+  num_cars: 2
+  num_drones: 1
   env_params: None
   map_name: "SanFrancisco"
   trainer:
