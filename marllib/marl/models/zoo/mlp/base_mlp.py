@@ -1,4 +1,5 @@
 # MIT License
+import logging
 
 # Copyright (c) 2023 Replicable-MARL
 
@@ -50,6 +51,7 @@ class BaseMLP(TorchModelV2, nn.Module):
         nn.Module.__init__(self)
 
         # decide the model arch
+        self.inputs = None
         self.custom_config = model_config["custom_model_config"]
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
@@ -87,19 +89,20 @@ class BaseMLP(TorchModelV2, nn.Module):
     def forward(self, input_dict: Dict[str, TensorType],
                 state: List[TensorType],
                 seq_lens: TensorType) -> (TensorType, List[TensorType]):
-
+        observation = input_dict['obs']['obs']
+        inf_mask = None
+        if isinstance(observation, dict):
+            flat_inputs = {k: v.float() for k, v in observation.items()}
+        else:
+            flat_inputs = observation.float()
         if self.custom_config["global_state_flag"] or self.custom_config["mask_flag"]:
-            flat_inputs = input_dict["obs"]["obs"].float()
             # Convert action_mask into a [0.0 || -inf]-type mask.
             if self.custom_config["mask_flag"]:
                 action_mask = input_dict["obs"]["action_mask"]
                 inf_mask = torch.clamp(torch.log(action_mask), min=FLOAT_MIN)
-        else:
-            flat_inputs = input_dict["obs"]["obs"].float()
 
         self.inputs = flat_inputs
         self._features = self.p_encoder(self.inputs)
-
         output = self.p_branch(self._features)
 
         if self.custom_config["mask_flag"]:
