@@ -1,4 +1,5 @@
 # MIT License
+import logging
 
 # Copyright (c) 2023 Replicable-MARL
 
@@ -84,7 +85,9 @@ class BaseRNN(TorchRNN, nn.Module):
             out_size=1,
             initializer=normc_initializer(0.01),
             activation_fn=None)
-
+        logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
+        logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
+        logging.debug(f"RNN Configuration: {self.rnn}")
         # Holds the current "base" output (before logits layer).
         self._features = None
 
@@ -129,26 +132,31 @@ class BaseRNN(TorchRNN, nn.Module):
         """
         Adds time dimension to batch before sending inputs to forward_rnn()
         """
+        observation = input_dict['obs']['obs']
+        inf_mask = None
+        if isinstance(observation, dict):
+            flat_inputs = {k: v.float() for k, v in observation.items()}
+        else:
+            flat_inputs = observation.float()
         if self.custom_config["global_state_flag"] or self.custom_config["mask_flag"]:
-            flat_inputs = input_dict["obs"]["obs"].float()
             # Convert action_mask into a [0.0 || -inf]-type mask.
             if self.custom_config["mask_flag"]:
                 action_mask = input_dict["obs"]["action_mask"]
                 inf_mask = torch.clamp(torch.log(action_mask), min=FLOAT_MIN)
-        else:
-            flat_inputs = input_dict["obs"]["obs"].float()
 
         if isinstance(seq_lens, np.ndarray):
             seq_lens = torch.Tensor(seq_lens).int()
-        max_seq_len = flat_inputs.shape[0] // seq_lens.shape[0]
-
+        logging.debug(f"flat_inputs shape:"
+                      f" {flat_inputs.shape if isinstance(flat_inputs, torch.Tensor) else [my_tensor.shape for my_tensor in flat_inputs.values()]}")
         self.time_major = self.model_config.get("_time_major", False)
-        inputs = add_time_dimension(
-            flat_inputs,
-            max_seq_len=max_seq_len,
-            framework="torch",
-            time_major=self.time_major,
-        )
+        kwargs = dict(framework="torch", time_major=self.time_major)
+        if isinstance(observation, dict):
+            inputs = {k: add_time_dimension(v, **{**kwargs, 'max_seq_len': v.shape[0] // seq_lens.shape[0]})
+                      for k, v in flat_inputs.items()}
+        else:
+            kwargs['max_seq_len'] = flat_inputs.shape[0] // seq_lens.shape[0]
+            inputs = add_time_dimension(flat_inputs, **kwargs)
+            # logging.debug(f"inputs shape: {inputs.shape}")
         output, hidden_state = self.forward_rnn(inputs, hidden_state, seq_lens)
         output = torch.reshape(output, [-1, self.num_outputs])
 

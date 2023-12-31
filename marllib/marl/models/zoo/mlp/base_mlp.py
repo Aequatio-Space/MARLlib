@@ -73,7 +73,8 @@ class BaseMLP(TorchModelV2, nn.Module):
             out_size=1,
             initializer=normc_initializer(0.01),
             activation_fn=None)
-
+        logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
+        logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
         # Holds the current "base" output (before logits layer).
         self._features = None
         # Holds the last input, in case value branch is separate.

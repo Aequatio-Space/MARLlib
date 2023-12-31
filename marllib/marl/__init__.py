@@ -1,6 +1,6 @@
 # MIT License
 # Copyright (c) 2023 Replicable-MARL
-
+from gym import spaces
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
 # in the Software without restriction, including without limitation the rights
@@ -320,7 +320,7 @@ def build_model(
     else:
         raise NotImplementedError("{} not supported agent model arch".format(model_preference["core_arch"]))
 
-    if len(environment[0].observation_space.spaces['obs']) > 1:
+    if isinstance(environment[0].observation_space.spaces['obs'], spaces.Dict):
         encoder = "mix_encoder"
     else:
         if len(environment[0].observation_space.spaces["obs"].shape) == 1:

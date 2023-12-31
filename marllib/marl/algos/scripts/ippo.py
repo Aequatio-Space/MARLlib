@@ -76,6 +76,7 @@ def run_ippo(model: Any, exp: Dict, run: Dict, env: Dict,
     num_sgd_iter = _param["num_sgd_iter"]
     vf_loss_coeff = _param["vf_loss_coeff"]
     entropy_coeff = _param["entropy_coeff"]
+    resume = _param["resume"]
     back_up_config = merge_dicts(exp, env)
     back_up_config.pop("algo_args")  # clean for grid_search
 
@@ -116,6 +117,7 @@ def run_ippo(model: Any, exp: Dict, run: Dict, env: Dict,
                        config=config,
                        verbose=1,
                        progress_reporter=CLIReporter(),
-                       local_dir=available_local_dir if exp["local_dir"] == "" else exp["local_dir"])
+                       local_dir=available_local_dir if exp["local_dir"] == "" else exp["local_dir"],
+                       resume=resume)
 
     return results
