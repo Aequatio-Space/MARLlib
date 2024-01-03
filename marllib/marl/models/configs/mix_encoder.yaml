@@ -26,7 +26,7 @@ model_arch_args:
   out_dim_fc_1: 64
   conv_layer: 1
   out_channel_layer_0: 8
-  kernel_size_layer_0: 5
+  kernel_size_layer_0: 4
   stride_layer_0: 2
   padding_layer_0: 2
   pool_size_layer_0: 3

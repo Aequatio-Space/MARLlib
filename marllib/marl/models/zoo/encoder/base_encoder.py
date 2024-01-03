@@ -70,7 +70,7 @@ class BaseEncoder(nn.Module):
         """
         Construct CNN layers
         """
-        input_dim = obs_space.shape[2]
+        input_dim = obs_space.shape[0]
         cnn_layers = []
         for i in range(self.custom_config["model_arch_args"]["conv_layer"]):
             cnn_layers.append(
@@ -141,12 +141,12 @@ class BaseEncoder(nn.Module):
             L = inputs.shape[1]
             inputs = inputs.reshape((-1,) + inputs.shape[2:])
             # inputs.reshape(B*L, )
-            x = cnn_network(inputs.permute(0, 3, 1, 2))
+            x = cnn_network(inputs)
             x = torch.mean(x, (2, 3))
             output = x.reshape((B, L, -1))
         else:
             logging.debug(f"cnn encoder input shape:{inputs.shape}")
-            x = cnn_network(inputs.permute(0, 3, 1, 2))
+            x = cnn_network(inputs)  # Does not understand why the channel dim is put at the last dim
             logging.debug(f"cnn encoder output shape:{x.shape}")
             output = torch.mean(x, (2, 3))
             logging.debug(f"cnn encoder second output shape:{output.shape}")

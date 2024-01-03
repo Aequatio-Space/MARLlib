@@ -1,5 +1,7 @@
 # MIT License
 # Copyright (c) 2023 Replicable-MARL
+import pprint
+
 from gym import spaces
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -149,7 +151,7 @@ def make_env(
         logging.debug("No logging config detected, continuing")
     if 'env_params' in no_log_args:
         no_log_args['env_params']['mock'] = True
-    logging.debug(f"full env_config: {env_config}")
+    logging.debug("full env_config:\n%s", pprint.pformat(env_config))
     if env_config["force_coop"]:
         register_env(env_reg_name, lambda _: COOP_ENV_REGISTRY[env_config["env"]](env_config["env_args"]))
         env = COOP_ENV_REGISTRY[env_config["env"]](no_log_args)
