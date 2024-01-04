@@ -42,7 +42,8 @@ class BaseEncoder(nn.Module):
 
         # decide the model arch
         self.custom_config = model_config["custom_model_config"]
-        self.activation = model_config.get("fcnet_activation")
+        self.fc_activation = model_config.get("fcnet_activation")
+        self.cnn_activation = model_config.get("conv_activation")
         self.mix_input = False
         self.inputs = None
         # encoder
@@ -66,12 +67,22 @@ class BaseEncoder(nn.Module):
             self.output_dim = input_dim  # record
         # logging.debug(f"Encoder Configuration: {self.encoder}")
 
+    # def calculate_cnn_to_fc_dim(self, obs_space: tuple):
+    #     """
+    #     Calculate the dimension of CNN output to be fed into FC layers
+    #     """
+    #     input_dim = obs_space
+    #     for i in range(self.custom_config["model_arch_args"]["conv_layer"]):
+    #         input_dim = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
+    #     return input_dim
+
     def construct_cnn_layers(self, obs_space):
         """
         Construct CNN layers
         """
         input_dim = obs_space.shape[0]
         cnn_layers = []
+        i = 0
         for i in range(self.custom_config["model_arch_args"]["conv_layer"]):
             cnn_layers.append(
                 SlimConv2d(
@@ -80,13 +91,17 @@ class BaseEncoder(nn.Module):
                     kernel=self.custom_config["model_arch_args"]["kernel_size_layer_{}".format(i)],
                     stride=self.custom_config["model_arch_args"]["stride_layer_{}".format(i)],
                     padding=self.custom_config["model_arch_args"]["padding_layer_{}".format(i)],
-                    activation_fn=self.activation
+                    activation_fn=self.cnn_activation,
                 )
             )
             pool_f = nn.MaxPool2d(kernel_size=self.custom_config["model_arch_args"]["pool_size_layer_{}".format(i)])
             cnn_layers.append(pool_f)
-
             input_dim = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
+        out_channels = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
+        cnn_layers.append(nn.Flatten())
+        last_pool_kernel = self.custom_config["model_arch_args"]["pool_size_layer_{}".format(i)]
+        cnn_layers.append(nn.Linear(out_channels * 16,
+                                    self.custom_config["model_arch_args"][f"out_channel_layer_{i}"]))
         return cnn_layers, input_dim
 
     def construct_fc_layer(self, obs_space):
@@ -110,7 +125,7 @@ class BaseEncoder(nn.Module):
                 SlimFC(in_size=input_dim,
                        out_size=out_dim,
                        initializer=normc_initializer(1.0),
-                       activation_fn=self.activation))
+                       activation_fn=self.fc_activation))
             input_dim = out_dim
         return fc_layers, input_dim
 
@@ -146,8 +161,8 @@ class BaseEncoder(nn.Module):
             output = x.reshape((B, L, -1))
         else:
             logging.debug(f"cnn encoder input shape:{inputs.shape}")
-            x = cnn_network(inputs)  # Does not understand why the channel dim is put at the last dim
-            logging.debug(f"cnn encoder output shape:{x.shape}")
-            output = torch.mean(x, (2, 3))
+            output = cnn_network(inputs)  # Does not understand why the channel dim is put at the last dim
+            # logging.debug(f"cnn encoder output shape:{x.shape}")
+            # output = torch.mean(x, (2, 3))
             logging.debug(f"cnn encoder second output shape:{output.shape}")
         return output
