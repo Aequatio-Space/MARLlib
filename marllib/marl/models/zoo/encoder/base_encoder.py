@@ -1,6 +1,7 @@
 # MIT License
 from typing import Union
 
+import math
 # Copyright (c) 2023 Replicable-MARL
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -99,8 +100,12 @@ class BaseEncoder(nn.Module):
             input_dim = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
         out_channels = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
         cnn_layers.append(nn.Flatten())
+        last_padding = self.custom_config["model_arch_args"]["padding_layer_{}".format(i)]
+        last_cnn_kernel = self.custom_config["model_arch_args"]["kernel_size_layer_{}".format(i)]
+        last_cnn_stride = self.custom_config["model_arch_args"]["stride_layer_{}".format(i)]
         last_pool_kernel = self.custom_config["model_arch_args"]["pool_size_layer_{}".format(i)]
-        cnn_layers.append(nn.Linear(out_channels * 16,
+        feature_length = math.ceil((10 + last_padding * 2 - last_cnn_kernel + 1) / last_cnn_stride) // last_pool_kernel
+        cnn_layers.append(nn.Linear(out_channels * feature_length * feature_length,
                                     self.custom_config["model_arch_args"][f"out_channel_layer_{i}"]))
         return cnn_layers, input_dim
 
