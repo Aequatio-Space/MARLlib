@@ -36,4 +36,5 @@ algo_args:
   clip_param: 0.3
   vf_clip_param: 10.0
   batch_mode: "truncate_episodes"
+  anneal_lr: False
 

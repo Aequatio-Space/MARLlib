@@ -77,6 +77,7 @@ def run_ippo(model: Any, exp: Dict, run: Dict, env: Dict,
     vf_loss_coeff = _param["vf_loss_coeff"]
     entropy_coeff = _param["entropy_coeff"]
     resume = _param["resume"]
+    anneal_lr = _param["anneal_lr"]
     back_up_config = merge_dicts(exp, env)
     back_up_config.pop("algo_args")  # clean for grid_search
 
@@ -84,7 +85,6 @@ def run_ippo(model: Any, exp: Dict, run: Dict, env: Dict,
         "batch_mode": batch_mode,
         "train_batch_size": train_batch_size,
         "sgd_minibatch_size": sgd_minibatch_size,
-        "lr": lr if restore is None else 0,
         "entropy_coeff": entropy_coeff,
         "num_sgd_iter": num_sgd_iter,
         "clip_param": clip_param,
@@ -99,7 +99,10 @@ def run_ippo(model: Any, exp: Dict, run: Dict, env: Dict,
             "custom_model_config": back_up_config,
         },
     }
-
+    if anneal_lr:
+        config["lr_schedule"] = [[0, lr], [stop['timesteps_total'], lr / 100]]
+    else:
+        config["lr"] = lr if restore is None else 0
     config.update(run)
 
     algorithm = exp["algorithm"]
