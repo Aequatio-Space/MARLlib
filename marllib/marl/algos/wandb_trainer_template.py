@@ -16,8 +16,7 @@ from ray.rllib.utils.annotations import override, DeveloperAPI
 from ray.rllib.utils.typing import EnvConfigDict, EnvType, \
     PartialTrainerConfigDict, ResultDict, TrainerConfigDict
 from run_configs.mcs_configs_python import run_config, PROJECT_NAME
-from envs.crowd_sim.crowd_sim import (AOI_METRIC_NAME, DATA_METRIC_NAME,
-                                      ENERGY_METRIC_NAME, COVERAGE_METRIC_NAME, MAIN_METRIC_NAME)
+from envs.crowd_sim.crowd_sim import define_metrics_crowdsim
 
 logger = logging.getLogger(__name__).setLevel(logging.ERROR)
 
@@ -192,14 +191,11 @@ def build_wandb_trainer(
                                                                                                  'tag'] is not None else [],
                        config=config, dir=self.logging_config['logging_dir'], resume=self.logging_config['resume'])
             # prefix = 'env/'
-            wandb.define_metric(COVERAGE_METRIC_NAME, summary="max")
-            wandb.define_metric(ENERGY_METRIC_NAME, summary="min")
-            wandb.define_metric(DATA_METRIC_NAME, summary="max")
-            wandb.define_metric(MAIN_METRIC_NAME, summary="max")
-            wandb.define_metric(AOI_METRIC_NAME, summary="min")
+            define_metrics_crowdsim()
 
         def __del__(self):
-            wandb.finish()
+            if wandb.run is not None:
+                wandb.finish()
 
         @override(Trainer)
         def step(self):
