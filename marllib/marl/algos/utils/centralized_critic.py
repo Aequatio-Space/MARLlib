@@ -51,11 +51,21 @@ def centralized_critic_postprocessing(policy,
                                       episode=None):
     custom_config = policy.config["model"]["custom_model_config"]
     pytorch = custom_config["framework"] == "torch"
-    obs_dim = get_dim(custom_config["space_obs"]["obs"].shape)
+    if "fc_layer" in custom_config["model_arch_args"] and "conv_layer" in custom_config["model_arch_args"]:
+        obs_dim = sum(get_dim(item.shape) for item in custom_config["space_obs"]['obs'].values())
+    else:
+        obs_dim = get_dim(custom_config["space_obs"]["obs"].shape)
     algorithm = custom_config["algorithm"]
     opp_action_in_cc = custom_config["opp_action_in_cc"]
     global_state_flag = custom_config["global_state_flag"]
     mask_flag = custom_config["mask_flag"]
+    if global_state_flag:
+        if "fc_layer" in custom_config["model_arch_args"] and "conv_layer" in custom_config["model_arch_args"]:
+            state_dim = sum(get_dim(item.shape) for item in custom_config["space_obs"]['state'].values())
+        else:
+            state_dim = get_dim(custom_config["space_obs"]["state"].shape)
+    else:
+        state_dim = 0
 
     if mask_flag:
         action_mask_dim = custom_config["space_act"].n
@@ -126,13 +136,8 @@ def centralized_critic_postprocessing(policy,
     else:
         # Policy hasn't been initialized yet, use zeros.
         o = sample_batch[SampleBatch.CUR_OBS]
-        if global_state_flag:
-            sample_batch["state"] = np.zeros((o.shape[0], get_dim(custom_config["space_obs"]["state"].shape) + get_dim(
-                custom_config["space_obs"]["obs"].shape)),
-                                             dtype=sample_batch[SampleBatch.CUR_OBS].dtype)
-        else:
-            sample_batch["state"] = np.zeros((o.shape[0], n_agents, obs_dim),
-                                             dtype=sample_batch[SampleBatch.CUR_OBS].dtype)
+        sample_batch["state"] = np.zeros((o.shape[0], n_agents, obs_dim + state_dim),
+                                         dtype=sample_batch[SampleBatch.CUR_OBS].dtype)
 
         sample_batch["vf_preds"] = np.zeros_like(
             sample_batch[SampleBatch.REWARDS], dtype=np.float32)

@@ -1,5 +1,9 @@
 # MIT License
+import logging
 
+from gym import spaces
+from functools import reduce
+from marllib.marl.algos.utils.centralized_Q import get_dim
 # Copyright (c) 2023 Replicable-MARL
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -22,12 +26,15 @@
 
 from ray.rllib.models.torch.misc import SlimFC, SlimConv2d, normc_initializer
 from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.typing import Dict, TensorType, List
+from ray.rllib.utils.typing import TensorType, List
+from marllib.marl.models.zoo.encoder.base_encoder import MixInputEncoderMixin
+
+from warp_drive.utils.constants import Constants
 
 torch, nn = try_import_torch()
 
 
-class CentralizedEncoder(nn.Module):
+class CentralizedEncoder(nn.Module, MixInputEncoderMixin):
     """Generic fully connected network."""
 
     def __init__(
@@ -41,76 +48,129 @@ class CentralizedEncoder(nn.Module):
         self.custom_config = model_config["custom_model_config"]
         self.activation = model_config.get("fcnet_activation")
         self.num_agents = self.custom_config["num_agents"]
-
+        self.encoder_layer_dim = []
+        # self.state_dim = None
+        # self.state_dim_last = None
         # encoder
+        if ("fc_layer" in self.custom_config["model_arch_args"] and
+                "conv_layer" in self.custom_config["model_arch_args"]):
+            self.mix_input = True
+            self.encoder = nn.ModuleDict()
+            # reconstruct obs_space so that it contains only 1D space
+            vec_obs_space = spaces.Dict({key: obs_space[key][Constants.VECTOR_STATE] for key in obs_space})
+            image_obs_space = spaces.Dict({key: obs_space[key][Constants.IMAGE_STATE] for key in obs_space})
+            fc_layers, dim1 = self.construct_fc_layer(vec_obs_space)
+            self.encoder['fc'] = nn.Sequential(*fc_layers)
+            cnn_layers, dim2 = self.construct_cnn_layers(image_obs_space)
+            self.encoder['cnn'] = nn.Sequential(*cnn_layers)
+            self.output_dim = dim1 + dim2
+        else:
+            self.mix_input = False
+            if "fc_layer" in self.custom_config["model_arch_args"]:
+                layers, input_dim = self.construct_fc_layer(obs_space)
+            elif "conv_layer" in self.custom_config["model_arch_args"]:
+                layers, input_dim = self.construct_cnn_layers(obs_space)
+            else:
+                raise ValueError("fc_layer/conv layer not in model arch args")
+
+            if "state" not in obs_space.spaces and "conv_layer" in self.custom_config["model_arch_args"]:
+                self.output_dim = input_dim * self.num_agents  # record
+            else:
+                self.output_dim = input_dim  # record
+            self.encoder = nn.Sequential(*layers)
+        my_space = self.custom_config['space_obs']
+        if self.mix_input:
+            self.obs_vec_dim = get_dim(my_space['obs'][Constants.VECTOR_STATE].shape)
+            self.obs_image_dim = get_dim(my_space['obs'][Constants.IMAGE_STATE].shape)
+            self.obs_dim = self.obs_vec_dim + self.obs_image_dim
+        else:
+            self.obs_dim = get_dim(my_space['obs'].shape)
+        # repeat for state
+        try:
+            if self.mix_input:
+                self.state_vec_dim = get_dim(my_space['state'][Constants.VECTOR_STATE].shape)
+                self.state_image_dim = get_dim(my_space['state'][Constants.IMAGE_STATE].shape)
+                self.state_dim = self.state_vec_dim + self.state_image_dim
+            else:
+                self.state_dim = get_dim(my_space['state'].shape)
+        except KeyError:
+            logging.debug("No State Space Detected")
+            self.state_vec_dim = 0
+            self.state_image_dim = 0
+            self.state_dim = 0
+
+    def construct_cnn_layers(self, obs_space):
         layers = []
-        if "fc_layer" in self.custom_config["model_arch_args"]:
-            if "encode_layer" in self.custom_config["model_arch_args"]:
-                encode_layer = self.custom_config["model_arch_args"]["encode_layer"]
-                encoder_layer_dim = encode_layer.split("-")
-                encoder_layer_dim = [int(i) for i in encoder_layer_dim]
-            else:  # default config
-                encoder_layer_dim = []
-                for i in range(self.custom_config["model_arch_args"]["fc_layer"]):
-                    out_dim = self.custom_config["model_arch_args"]["out_dim_fc_{}".format(i)]
-                    encoder_layer_dim.append(out_dim)
-
-            self.encoder_layer_dim = encoder_layer_dim
-            if "state" not in obs_space.spaces:
-                input_dim = self.num_agents * obs_space['obs'].shape[0]
-            else:
-                input_dim = obs_space['state'].shape[0] + obs_space['obs'].shape[0]
-            for out_dim in self.encoder_layer_dim:
-                layers.append(
-                    SlimFC(in_size=input_dim,
-                           out_size=out_dim,
-                           initializer=normc_initializer(1.0),
-                           activation_fn=self.activation))
-                input_dim = out_dim
-        elif "conv_layer" in self.custom_config["model_arch_args"]:
-            if "state" not in obs_space.spaces:
-                self.state_dim = obs_space["obs"].shape
-                self.state_dim_last = self.state_dim[-1]
-                input_dim = obs_space['obs'].shape[2]
-            else:
-                self.state_dim = obs_space["state"].shape
-                self.state_dim_last = obs_space["state"].shape[2] + obs_space["obs"].shape[2]
-                input_dim = obs_space['state'].shape[2] + obs_space['obs'].shape[2]
-
-            for i in range(self.custom_config["model_arch_args"]["conv_layer"]):
-                layers.append(
-                    SlimConv2d(
-                        in_channels=input_dim,
-                        out_channels=self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)],
-                        kernel=self.custom_config["model_arch_args"]["kernel_size_layer_{}".format(i)],
-                        stride=self.custom_config["model_arch_args"]["stride_layer_{}".format(i)],
-                        padding=self.custom_config["model_arch_args"]["padding_layer_{}".format(i)],
-                        activation_fn=self.activation
-                    )
+        if "state" not in obs_space.spaces:
+            # self.state_dim = obs_space["obs"].shape
+            # self.state_dim_last = self.state_dim[-1]
+            input_dim = obs_space['obs'].shape[0]
+        else:
+            # self.state_dim = obs_space["state"].shape
+            # self.state_dim_last = obs_space["state"].shape[2] + obs_space["obs"].shape[2]
+            input_dim = obs_space['state'].shape[0] + obs_space['obs'].shape[2]
+        i = 0
+        for i in range(self.custom_config["model_arch_args"]["conv_layer"]):
+            layers.append(
+                SlimConv2d(
+                    in_channels=input_dim,
+                    out_channels=self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)],
+                    kernel=self.custom_config["model_arch_args"]["kernel_size_layer_{}".format(i)],
+                    stride=self.custom_config["model_arch_args"]["stride_layer_{}".format(i)],
+                    padding=self.custom_config["model_arch_args"]["padding_layer_{}".format(i)],
+                    activation_fn=self.activation
                 )
-                pool_f = nn.MaxPool2d(kernel_size=self.custom_config["model_arch_args"]["pool_size_layer_{}".format(i)])
-                layers.append(pool_f)
+            )
+            pool_f = nn.MaxPool2d(kernel_size=self.custom_config["model_arch_args"]["pool_size_layer_{}".format(i)])
+            layers.append(pool_f)
+            input_dim = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
+        linear_input = self.cnn_to_fc_convert(i)
+        layers.append(nn.Linear(linear_input,
+                                self.custom_config["model_arch_args"][f"out_channel_layer_{i}"]))
+        return layers, input_dim
 
-                input_dim = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
-
+    def construct_fc_layer(self, obs_space):
+        fc_layers = []
+        encoder_layer_dim = self.get_encoder_layer()
+        self.encoder_layer_dim = encoder_layer_dim
+        if "state" not in obs_space.spaces:
+            input_dim = self.num_agents * obs_space['obs'].shape[0]
         else:
-            raise ValueError("fc_layer/conv layer not in model arch args")
+            input_dim = obs_space['state'].shape[0] + obs_space['obs'].shape[0]
+        for out_dim in self.encoder_layer_dim:
+            fc_layers.append(
+                SlimFC(in_size=input_dim,
+                       out_size=out_dim,
+                       initializer=normc_initializer(1.0),
+                       activation_fn=self.activation))
+            input_dim = out_dim
+        return fc_layers, input_dim
 
-        if "state" not in obs_space.spaces and "conv_layer" in self.custom_config["model_arch_args"]:
-            self.output_dim = input_dim * self.num_agents  # record
-        else:
-            self.output_dim = input_dim  # record
-        self.encoder = nn.Sequential(*layers)
+    def cnn_forward(self, cnn_network: nn.Module, inputs):
+        """
+        Forward pass for CNN
+        """
+        # x = inputs.reshape(-1, self.state_dim[0], self.state_dim[1], self.state_dim_last)
+        return cnn_network(inputs)
 
     def forward(self, inputs) -> (TensorType, List[TensorType]):
-
-        # Compute the unmasked logits.
-        if "conv_layer" in self.custom_config["model_arch_args"]:
-            x = inputs.reshape(-1, self.state_dim[0], self.state_dim[1], self.state_dim_last)
-            x = self.encoder(x.permute(0, 3, 1, 2))
-            output = torch.mean(x, (2, 3))
+        if self.mix_input:
+            vector_input = torch.cat((inputs[:, :, :self.obs_vec_dim],
+                                      inputs[:, :, self.obs_dim:self.obs_dim + self.state_vec_dim]), dim=-1)
+            batch_size = reduce(lambda x, y: x * y, *inputs.shape[:2])
+            image_input = torch.cat(
+                (inputs[:, :, self.obs_vec_dim:self.obs_dim].reshape((batch_size, -1, 10, 10)),
+                 inputs[:, :, self.obs_dim + self.state_vec_dim:].reshape((batch_size, -1, 10, 10))), dim=2)
+            output = torch.cat([self.encoder['fc'](vector_input),
+                                self.cnn_forward(self.encoder['cnn'], image_input)], dim=-1)
         else:
-            inputs = inputs.reshape(inputs.shape[0], -1)
-            output = self.encoder(inputs)
+            # Compute the unmasked logits.
+            if "conv_layer" in self.custom_config["model_arch_args"]:
+                # x = inputs.reshape(-1, self.state_dim[0], self.state_dim[1], self.state_dim_last)
+                # x = self.encoder(x.permute(0, 3, 1, 2))
+                output = self.encoder(inputs)
+            else:
+                inputs = inputs.reshape(inputs.shape[0], -1)
+                output = self.encoder(inputs)
 
         return output

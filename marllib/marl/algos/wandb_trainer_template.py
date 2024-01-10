@@ -187,8 +187,7 @@ def build_wandb_trainer(
             if not self.logging_config:
                 return
             wandb.init(project=PROJECT_NAME, name=self.logging_config['expr_name'], group=self.logging_config['group'],
-                       tags=[self.logging_config['dataset']] + self.logging_config['tag'] if self.logging_config[
-                                                                                                 'tag'] is not None else [],
+                       tags=self.logging_config['tag'] if self.logging_config['tag'] is not None else [],
                        config=config, dir=self.logging_config['logging_dir'], resume=self.logging_config['resume'])
             # prefix = 'env/'
             define_metrics_crowdsim()

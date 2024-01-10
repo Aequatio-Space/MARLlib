@@ -23,6 +23,7 @@
 import numpy as np
 from gym.spaces import Box, MultiDiscrete
 from functools import reduce
+import logging
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 from ray.rllib.models.torch.misc import SlimFC, normc_initializer
 from ray.rllib.utils.annotations import override
@@ -52,7 +53,6 @@ class CentralizedCriticMLP(BaseMLP):
 
         # encoder for centralized VF
         self.cc_vf_encoder = CentralizedEncoder(model_config, self.full_obs_space)
-
         # Central VF
         if self.custom_config["opp_action_in_cc"]:
             if isinstance(self.custom_config["space_act"], Box):  # continuous
@@ -95,6 +95,9 @@ class CentralizedCriticMLP(BaseMLP):
                 )
 
                 self.actor_optimizer = Adam(params=self.parameters(), lr=self.custom_config["actor_lr"])
+        print(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
+        print(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
+        print(f"Centralized Encoder Configuration: {self.cc_vf_encoder}, {self.cc_vf_branch}")
 
     def central_value_function(self, state, opponent_actions=None) -> TensorType:
         assert self._features is not None, "must call forward() first"

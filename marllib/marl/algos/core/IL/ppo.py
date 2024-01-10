@@ -22,7 +22,7 @@
 
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from ray.rllib.agents.ppo.ppo_torch_policy import PPOTorchPolicy
-from ray.rllib.agents.ppo.ppo import PPOTrainer as PPOTrainer, DEFAULT_CONFIG as PPO_CONFIG
+from ray.rllib.agents.ppo.ppo import DEFAULT_CONFIG as PPO_CONFIG
 
 ###########
 ### PPO ###

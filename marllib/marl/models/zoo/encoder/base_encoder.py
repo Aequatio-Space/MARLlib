@@ -1,4 +1,5 @@
 # MIT License
+import logging
 from typing import Union
 
 import math
@@ -31,7 +32,38 @@ import logging
 torch, nn = try_import_torch()
 
 
-class BaseEncoder(nn.Module):
+class MixInputEncoderMixin:
+    """
+    Mix input convert mixin
+    Common functions for mix input encoder.
+    Do not use separately.
+    """
+    custom_config = {}
+
+    def get_encoder_layer(self):
+        if "encode_layer" in self.custom_config["model_arch_args"]:
+            encode_layer = self.custom_config["model_arch_args"]["encode_layer"]
+            encoder_layer_dim = encode_layer.split("-")
+            encoder_layer_dim = [int(i) for i in encoder_layer_dim]
+        else:  # default config
+            encoder_layer_dim = []
+            for i in range(self.custom_config["model_arch_args"]["fc_layer"]):
+                out_dim = self.custom_config["model_arch_args"]["out_dim_fc_{}".format(i)]
+                encoder_layer_dim.append(out_dim)
+        return encoder_layer_dim
+
+    def cnn_to_fc_convert(self, i):
+        out_channels = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
+        last_padding = self.custom_config["model_arch_args"]["padding_layer_{}".format(i)]
+        last_cnn_kernel = self.custom_config["model_arch_args"]["kernel_size_layer_{}".format(i)]
+        last_cnn_stride = self.custom_config["model_arch_args"]["stride_layer_{}".format(i)]
+        last_pool_kernel = self.custom_config["model_arch_args"]["pool_size_layer_{}".format(i)]
+        feature_length = math.ceil((10 + last_padding * 2 - last_cnn_kernel + 1) / last_cnn_stride) // last_pool_kernel
+        linear_input = out_channels * feature_length * feature_length
+        return linear_input
+
+
+class BaseEncoder(nn.Module, MixInputEncoderMixin):
     """Generic fully connected network."""
 
     def __init__(
@@ -66,16 +98,7 @@ class BaseEncoder(nn.Module):
                 raise ValueError("fc_layer/conv layer not in model arch args")
             self.encoder = nn.Sequential(*layers)
             self.output_dim = input_dim  # record
-        # logging.debug(f"Encoder Configuration: {self.encoder}")
-
-    # def calculate_cnn_to_fc_dim(self, obs_space: tuple):
-    #     """
-    #     Calculate the dimension of CNN output to be fed into FC layers
-    #     """
-    #     input_dim = obs_space
-    #     for i in range(self.custom_config["model_arch_args"]["conv_layer"]):
-    #         input_dim = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
-    #     return input_dim
+        logging.debug(f"Encoder Configuration: {self.encoder}")
 
     def construct_cnn_layers(self, obs_space):
         """
@@ -98,14 +121,9 @@ class BaseEncoder(nn.Module):
             pool_f = nn.MaxPool2d(kernel_size=self.custom_config["model_arch_args"]["pool_size_layer_{}".format(i)])
             cnn_layers.append(pool_f)
             input_dim = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
-        out_channels = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
         cnn_layers.append(nn.Flatten())
-        last_padding = self.custom_config["model_arch_args"]["padding_layer_{}".format(i)]
-        last_cnn_kernel = self.custom_config["model_arch_args"]["kernel_size_layer_{}".format(i)]
-        last_cnn_stride = self.custom_config["model_arch_args"]["stride_layer_{}".format(i)]
-        last_pool_kernel = self.custom_config["model_arch_args"]["pool_size_layer_{}".format(i)]
-        feature_length = math.ceil((10 + last_padding * 2 - last_cnn_kernel + 1) / last_cnn_stride) // last_pool_kernel
-        cnn_layers.append(nn.Linear(out_channels * feature_length * feature_length,
+        linear_input = self.cnn_to_fc_convert(i)
+        cnn_layers.append(nn.Linear(linear_input,
                                     self.custom_config["model_arch_args"][f"out_channel_layer_{i}"]))
         return cnn_layers, input_dim
 
@@ -113,15 +131,7 @@ class BaseEncoder(nn.Module):
         """
         Construct (Multiple) FC layers
         """
-        if "encode_layer" in self.custom_config["model_arch_args"]:
-            encode_layer = self.custom_config["model_arch_args"]["encode_layer"]
-            encoder_layer_dim = encode_layer.split("-")
-            encoder_layer_dim = [int(i) for i in encoder_layer_dim]
-        else:  # default config
-            encoder_layer_dim = []
-            for i in range(self.custom_config["model_arch_args"]["fc_layer"]):
-                out_dim = self.custom_config["model_arch_args"]["out_dim_fc_{}".format(i)]
-                encoder_layer_dim.append(out_dim)
+        encoder_layer_dim = self.get_encoder_layer()
         # self.encoder_layer_dim = encoder_layer_dim
         input_dim = obs_space.shape[0]
         fc_layers = []
@@ -137,19 +147,19 @@ class BaseEncoder(nn.Module):
     def forward(self, inputs: Union[TensorType, dict]) -> (TensorType, List[TensorType]):
         if self.mix_input:
             state, grid = tuple(inputs.values())
-            # logging.debug(f"encoder input shape:{state.shape},{grid.shape}")
+            logging.debug(f"encoder input shape:{state.shape},{grid.shape}")
             output = torch.cat([self.encoder['fc'](state),
                                 self.cnn_forward(self.encoder['cnn'], grid)], dim=-1)
 
         else:
             # Compute the unmasked logits.
-            # logging.debug(f"encoder input shape:{inputs.shape}")
+            logging.debug(f"encoder input shape:{inputs.shape}")
             if "conv_layer" in self.custom_config["model_arch_args"]:
                 output = self.cnn_forward(self.encoder, inputs)
             else:
                 self.inputs = inputs.reshape(inputs.shape[0], -1)
                 output = self.encoder(inputs)
-        # logging.debug(f"encoder output shape:{output.shape}")
+        logging.debug(f"encoder output shape:{output.shape}")
         return output
 
     def cnn_forward(self, cnn_network: nn.Module, inputs):
