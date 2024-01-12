@@ -21,9 +21,9 @@ import logging
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import wandb
 from ray.rllib.utils.torch_ops import FLOAT_MIN
 from functools import reduce
-import copy
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.models.torch.misc import SlimFC, SlimConv2d, normc_initializer
 from ray.rllib.utils.annotations import override
@@ -85,6 +85,8 @@ class BaseMLP(TorchModelV2, nn.Module):
         self.actors = [self.p_encoder, self.p_branch]
         self.critics = [self.vf_encoder, self.vf_branch]
         self.actor_initialized_parameters = self.actor_parameters()
+        if wandb.run is not None:
+            wandb.watch(models=(*self.actors, *self.critics), log='all')
 
     @override(TorchModelV2)
     def forward(self, input_dict: Dict[str, TensorType],

@@ -134,6 +134,10 @@ def run_il(exp_info, env, model, stop=None):
         },
         "framework": exp_info["framework"],
         "evaluation_interval": exp_info["evaluation_interval"],
+        "evaluation_config": {
+            "record_env": False,
+            "render_env": True,
+        },
         "simple_optimizer": False,  # force using better optimizer
         "track": exp_info.get("track", False),
         "logging_config": exp_info.get("logging_config", {}),
