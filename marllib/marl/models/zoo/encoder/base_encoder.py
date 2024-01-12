@@ -181,3 +181,56 @@ class BaseEncoder(nn.Module, MixInputEncoderMixin):
             # output = torch.mean(x, (2, 3))
             # logging.debug(f"cnn encoder second output shape:{output.shape}")
         return output
+
+
+class ResNetBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, activation_fn):
+        super(ResNetBlock, self).__init__()
+        self.conv1 = SlimConv2d(in_channels, out_channels, kernel_size, stride, padding, activation_fn)
+        self.conv2 = SlimConv2d(out_channels, out_channels, kernel_size, stride, padding, activation_fn)
+
+    def forward(self, x):
+        residual = x
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x += residual
+        return x
+
+
+class ResNetCNNEncoder(nn.Module):
+
+    def __init__(
+            self,
+            model_config,
+            obs_space
+    ):
+        nn.Module.__init__(self)
+
+        # decide the model arch
+        self.custom_config = model_config["custom_model_config"]
+        self.cnn_activation = model_config.get("conv_activation")
+        # set number of ResNet blocks according to model_config
+        self.num_blocks = self.custom_config["model_arch_args"]["num_blocks"]
+        # construct the encoder
+        self.main_encoder = nn.Sequential(
+            *[ResNetBlock(
+                in_channels=self.custom_config["model_arch_args"]["out_channel_layer_0"],
+                out_channels=self.custom_config["model_arch_args"]["out_channel_layer_0"],
+                kernel_size=self.custom_config["model_arch_args"]["kernel_size_layer_0"],
+                stride=self.custom_config["model_arch_args"]["stride_layer_0"],
+                padding=self.custom_config["model_arch_args"]["padding_layer_0"],
+                activation_fn=self.cnn_activation
+            ) for _ in range(self.num_blocks - 1)])
+        # flatten the input and convert to FC
+        self.to_fc = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(self.custom_config["model_arch_args"]["out_channel_layer_0"] * 10 * 10,
+                      self.custom_config["model_arch_args"]["out_channel_layer_0"])
+        )
+
+    def forward(self, inputs: Union[TensorType, dict]) -> (TensorType, List[TensorType]):
+        if "conv_layer" in self.custom_config["model_arch_args"]:
+            output = self.to_fc(self.main_encoder(inputs))
+        else:
+            raise ValueError("conv_layer not in model arch args")
+        return output

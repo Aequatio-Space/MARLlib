@@ -20,9 +20,25 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from .base_mlp import BaseMLP
-from .cc_mlp import CentralizedCriticMLP
-from .ddpg_mlp import DDPGSeriesMLP
-from .jointQ_mlp import JointQMLP
-from .vd_mlp import ValueDecompMLP
-from .crowdsim_net import CrowdSimNet
+model_arch_args:
+  status_encoder:
+    model_arch_args:
+      fc_layer: 4
+      out_dim_fc_0: 64
+      out_dim_fc_1: 128
+      out_dim_fc_2: 128
+      out_dim_fc_3: 32
+  emergency_encoder:
+    model_arch_args:
+      fc_layer: 1
+      out_dim_fc_0: 32
+  grid_encoder:
+    model_arch_args:
+      resnet_layer: 2
+      resnet_channel_layer_0: 8
+      resnet_channel_layer_1: 32
+      kernel_size_layer_0: 3
+      stride_layer_0: 1
+      padding_layer_0: 2
+      pool_size_layer_0: 3
+

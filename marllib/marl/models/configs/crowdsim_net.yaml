@@ -20,9 +20,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from .base_mlp import BaseMLP
-from .cc_mlp import CentralizedCriticMLP
-from .ddpg_mlp import DDPGSeriesMLP
-from .jointQ_mlp import JointQMLP
-from .vd_mlp import ValueDecompMLP
-from .crowdsim_net import CrowdSimNet
+status_dim: 20
+emergency_dim: 4
+hidden_state_size: 32
