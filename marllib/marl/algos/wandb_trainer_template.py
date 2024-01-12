@@ -263,14 +263,13 @@ def build_wandb_trainer(
 
                 fn = partial(fn, task_fn=self.config["env_task_fn"])
                 self.workers.foreach_env_with_context(fn)
-            # custom logic, fetch environment metrics
-            local_worker = self.workers.local_worker()
-            # if local_worker is not None:
-            #     infos = local_worker.env.collect_info()
-            #     step_results.update(infos)
             if wandb.run is not None:
                 log_results: dict = deepcopy(step_results)
-                del log_results['hist_stats']
+                try:
+                    del log_results['hist_stats']
+                    del log_results['evaluation/hist_stats']
+                except KeyError:
+                    pass
                 wandb.log(unwrap_and_concatenate_dict(log_results))
             return step_results
 
