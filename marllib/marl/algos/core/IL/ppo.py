@@ -34,14 +34,30 @@ IPPOTorchPolicy = PPOTorchPolicy.with_updates(
     get_default_config=lambda: PPO_CONFIG,
 )
 
+TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
+    name="TrafficPPOTorchPolicy",
+    get_default_config=lambda: PPO_CONFIG,
+    # loss_fn=traffic_ppo_loss,
+)
 
 def get_policy_class_ppo(config_):
     if config_["framework"] == "torch":
         return IPPOTorchPolicy
 
 
+def get_policy_class_traffic_ppo(config_):
+    if config_["framework"] == "torch":
+        return TrafficPPOTorchPolicy
+
+
 IPPOTrainer = WandbPPOTrainer.with_updates(
     name="IPPOTrainer",
     default_policy=None,
     get_policy_class=get_policy_class_ppo,
+)
+
+TrafficPPOTrainer = WandbPPOTrainer.with_updates(
+    name="TrafficPPOTrainer",
+    default_policy=None,
+    get_policy_class=get_policy_class_traffic_ppo,
 )

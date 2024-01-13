@@ -86,7 +86,7 @@ class BaseMLP(TorchModelV2, nn.Module):
         self.critics = [self.vf_encoder, self.vf_branch]
         self.actor_initialized_parameters = self.actor_parameters()
         if wandb.run is not None:
-            wandb.watch(models=(*self.actors, *self.critics), log='all')
+            wandb.watch(models=tuple(self.actors), log='all')
 
     @override(TorchModelV2)
     def forward(self, input_dict: Dict[str, TensorType],
@@ -129,3 +129,64 @@ class BaseMLP(TorchModelV2, nn.Module):
 
     def critic_parameters(self):
         return reduce(lambda x, y: x + y, map(lambda p: list(p.parameters()), self.critics))
+
+
+class CrowdSimMLP(BaseMLP):
+    def __init__(
+            self,
+            obs_space,
+            action_space,
+            num_outputs,
+            model_config,
+            name,
+            **kwargs,
+    ):
+        super().__init__(obs_space, action_space, num_outputs, model_config, name, **kwargs)
+        self.embedding_dim = 32
+        self.keys_fc = SlimFC(
+            in_size=self.p_encoder.output_dim,
+            out_size=self.embedding_dim,
+            initializer=normc_initializer(0.01),
+            activation_fn=None)
+        self.query_fc = SlimFC(
+            in_size=self.p_encoder.output_dim,
+            out_size=self.embedding_dim,
+            initializer=normc_initializer(0.01),
+            activation_fn=None)
+        self.sqrt_dim = torch.sqrt(torch.tensor(self.embedding_dim, dtype=torch.float32))
+        self.reward_predict_fc = SlimFC(
+            in_size=self.embedding_dim,
+            out_size=1,
+            initializer=normc_initializer(0.01),
+            activation_fn=None)
+
+    def forward(self, input_dict: Dict[str, TensorType],
+                state: List[TensorType],
+                seq_lens: TensorType) -> (TensorType, List[TensorType]):
+        observation = input_dict['obs']['obs']
+        inf_mask = None
+        if isinstance(observation, dict):
+            flat_inputs = {k: v.float() for k, v in observation.items()}
+        else:
+            flat_inputs = observation.float()
+        if self.custom_config["global_state_flag"] or self.custom_config["mask_flag"]:
+            # Convert action_mask into a [0.0 || -inf]-type mask.
+            if self.custom_config["mask_flag"]:
+                action_mask = input_dict["obs"]["action_mask"]
+                inf_mask = torch.clamp(torch.log(action_mask), min=FLOAT_MIN)
+
+        agents_features, emgergency_features = input_dict['obs']['obs']
+        agents_embedding = self.keys_fc(agents_features)
+        emgergency_embedding = self.query_fc(emgergency_features)
+        # calculate the attention map for agents and emergency PoIs
+        attention_map = torch.matmul(agents_embedding, emgergency_embedding.transpose(1, 2))
+        # go through softmax
+        attention_map = torch.softmax(attention_map / self.sqrt_dim, dim=1)
+        attention_features = torch.matmul(attention_map, emgergency_features)
+        predicted_reward = self.reward_predict_fc(attention_features)
+        logits = self.p_branch(agents_features)
+
+        if self.custom_config["mask_flag"]:
+            output = logits + inf_mask
+
+        return output, predicted_reward, state

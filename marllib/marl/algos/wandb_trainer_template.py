@@ -267,7 +267,9 @@ def build_wandb_trainer(
                 log_results: dict = deepcopy(step_results)
                 try:
                     del log_results['hist_stats']
-                    del log_results['evaluation/hist_stats']
+                    for item in log_results['evaluation']:
+                        if item == 'hist_stats':
+                            del log_results['evaluation'][item]
                 except KeyError:
                     pass
                 wandb.log(unwrap_and_concatenate_dict(log_results))
