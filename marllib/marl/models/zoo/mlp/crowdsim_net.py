@@ -37,6 +37,9 @@ torch, nn = try_import_torch()
 
 
 class TripleHeadEncoder(nn.Module):
+    """
+    Encoder for Special Mix input of crowdsim environment.
+    """
     def __init__(self, custom_model_config, model_arch_args, obs_space):
         super(TripleHeadEncoder, self).__init__()
         self.custom_config = custom_model_config

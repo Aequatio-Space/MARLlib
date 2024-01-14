@@ -152,9 +152,7 @@ class BaseMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         return BaseMLPMixin.value_function(self)
 
 
-
-
-class CrowdSimMLP(BaseMLP):
+class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
     def __init__(
             self,
             obs_space,
