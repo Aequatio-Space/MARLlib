@@ -34,7 +34,60 @@ from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
 torch, nn = try_import_torch()
 
 
-class BaseMLP(TorchModelV2, nn.Module):
+class BaseMLPMixin:
+
+    def __init__(self):
+        self.custom_config = None
+        self.p_encoder = None
+        self.p_branch = None
+        self.vf_encoder = None
+        self.vf_branch = None
+        self.q_flag = False
+        self.actors = None
+        self.critics = None
+
+    def forward(self, input_dict: Dict[str, TensorType],
+                state: List[TensorType],
+                seq_lens: TensorType) -> (TensorType, List[TensorType]):
+        observation = input_dict['obs']['obs']
+        inf_mask = None
+        if isinstance(observation, dict):
+            flat_inputs = {k: v.float() for k, v in observation.items()}
+        else:
+            flat_inputs = observation.float()
+        if self.custom_config["global_state_flag"] or self.custom_config["mask_flag"]:
+            # Convert action_mask into a [0.0 || -inf]-type mask.
+            if self.custom_config["mask_flag"]:
+                action_mask = input_dict["obs"]["action_mask"]
+                inf_mask = torch.clamp(torch.log(action_mask), min=FLOAT_MIN)
+
+        self.inputs = flat_inputs
+        self._features = self.p_encoder(self.inputs)
+        output = self.p_branch(self._features)
+
+        if self.custom_config["mask_flag"]:
+            output = output + inf_mask
+
+        return output, state
+
+    def value_function(self) -> TensorType:
+        assert self._features is not None, "must call forward() first"
+        B = self._features.shape[0]
+        x = self.vf_encoder(self.inputs)
+
+        if self.q_flag:
+            return torch.reshape(self.vf_branch(x), [B, -1])
+        else:
+            return torch.reshape(self.vf_branch(x), [-1])
+
+    def actor_parameters(self):
+        return reduce(lambda x, y: x + y, map(lambda p: list(p.parameters()), self.actors))
+
+    def critic_parameters(self):
+        return reduce(lambda x, y: x + y, map(lambda p: list(p.parameters()), self.critics))
+
+
+class BaseMLP(TorchModelV2, nn.Module, BaseMLPMixin):
     """Generic fully connected network."""
 
     def __init__(
@@ -49,6 +102,7 @@ class BaseMLP(TorchModelV2, nn.Module):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs,
                               model_config, name)
         nn.Module.__init__(self)
+        BaseMLPMixin.__init__(self)
 
         # decide the model arch
         self.inputs = None
@@ -79,7 +133,6 @@ class BaseMLP(TorchModelV2, nn.Module):
         self._features = None
         # Holds the last input, in case value branch is separate.
         self._last_obs = None
-
         self.q_flag = False
 
         self.actors = [self.p_encoder, self.p_branch]
@@ -92,43 +145,13 @@ class BaseMLP(TorchModelV2, nn.Module):
     def forward(self, input_dict: Dict[str, TensorType],
                 state: List[TensorType],
                 seq_lens: TensorType) -> (TensorType, List[TensorType]):
-        observation = input_dict['obs']['obs']
-        inf_mask = None
-        if isinstance(observation, dict):
-            flat_inputs = {k: v.float() for k, v in observation.items()}
-        else:
-            flat_inputs = observation.float()
-        if self.custom_config["global_state_flag"] or self.custom_config["mask_flag"]:
-            # Convert action_mask into a [0.0 || -inf]-type mask.
-            if self.custom_config["mask_flag"]:
-                action_mask = input_dict["obs"]["action_mask"]
-                inf_mask = torch.clamp(torch.log(action_mask), min=FLOAT_MIN)
-
-        self.inputs = flat_inputs
-        self._features = self.p_encoder(self.inputs)
-        output = self.p_branch(self._features)
-
-        if self.custom_config["mask_flag"]:
-            output = output + inf_mask
-
-        return output, state
+        return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
 
     @override(TorchModelV2)
     def value_function(self) -> TensorType:
-        assert self._features is not None, "must call forward() first"
-        B = self._features.shape[0]
-        x = self.vf_encoder(self.inputs)
+        return BaseMLPMixin.value_function(self)
 
-        if self.q_flag:
-            return torch.reshape(self.vf_branch(x), [B, -1])
-        else:
-            return torch.reshape(self.vf_branch(x), [-1])
 
-    def actor_parameters(self):
-        return reduce(lambda x, y: x + y, map(lambda p: list(p.parameters()), self.actors))
-
-    def critic_parameters(self):
-        return reduce(lambda x, y: x + y, map(lambda p: list(p.parameters()), self.critics))
 
 
 class CrowdSimMLP(BaseMLP):
@@ -187,6 +210,6 @@ class CrowdSimMLP(BaseMLP):
         logits = self.p_branch(agents_features)
 
         if self.custom_config["mask_flag"]:
-            output = logits + inf_mask
+            logits = logits + inf_mask
 
-        return output, predicted_reward, state
+        return logits, predicted_reward, state
