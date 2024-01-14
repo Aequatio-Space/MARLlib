@@ -4,7 +4,8 @@ import logging
 import numpy as np
 from gym import spaces
 # Copyright (c) 2023 Replicable-MARL
-
+from ray.rllib.utils.torch_ops import FLOAT_MIN
+from warp_drive.utils.constants import Constants
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
 # in the Software without restriction, including without limitation the rights
@@ -23,9 +24,7 @@ from gym import spaces
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from ray.rllib.utils.torch_ops import FLOAT_MIN
 from functools import reduce
-import copy
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.models.torch.misc import SlimFC, SlimConv2d, normc_initializer
 from ray.rllib.utils.annotations import override
@@ -54,38 +53,44 @@ class CrowdSimNet(TorchModelV2, nn.Module):
 
         # decide the model arch
         self.inputs = None
+        self._features = None
+        self.q_flag = False
         self.custom_config = model_config["custom_model_config"]
+        self.model_arch_args = self.custom_config["model_arch_args"]
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
         self.activation = model_config.get("fcnet_activation")
 
-        # Three encoders, two for vector input, one for image input
-        status_obs_space = spaces.Box(low=0, high=1, shape=(self.custom_config['status_dim']), dtype=np.float32)
-        emergency_obs_space = spaces.Box(low=0, high=2, shape=(self.custom_config['emergency_dim']), dtype=np.float32)
-        self.status_encoder = BaseEncoder(status_obs_space, self.custom_config['status_encoder'])
-        self.emergency_encoder = BaseEncoder(emergency_obs_space, self.custom_config['emergency_encoder'])
-        self.grid_encoder = ResNetCNNEncoder(self.full_obs_space["grid"], self.custom_config['grid_encoder'])
-
+        # Two encoders, one for image and vector input, one for vector input.
+        status_grid_space = dict(obs=spaces.Dict({
+            'agents_state': spaces.Box(low=0, high=2, shape=eval(self.custom_config['status_dim']), dtype=np.float32),
+            'grid': spaces.Box(low=0, high=1, shape=eval(self.custom_config['grid_dim']), dtype=np.float32)
+        }))
+        emergency_obs_space = dict(obs=spaces.Box(low=0, high=2, shape=eval(self.custom_config['emergency_dim']),
+                                                  dtype=np.float32))
+        self.status_grid_encoder = BaseEncoder(self.model_arch_args['status_encoder'], status_grid_space)
+        self.emergency_encoder = BaseEncoder(self.model_arch_args['emergency_encoder'], emergency_obs_space)
+        self.emergency_dim = eval(self.custom_config['emergency_dim'])[0]
         # Merge the three branches
-        full_feature_output = self.custom_config["hidden_state_size"][0] * 3
+        full_feature_output = self.emergency_encoder.output_dim + self.status_grid_encoder.output_dim
         self.merge_branch = SlimFC(
             in_size=full_feature_output,
-            out_size=self.custom_config["hidden_state_size"][0],
+            out_size=self.custom_config["hidden_state_size"],
             initializer=normc_initializer(1.0),
             activation_fn=self.activation,
         )
 
         # Value Function
-        self.value_branch = SlimFC(
-            in_size=full_feature_output,
+        self.vf_branch = SlimFC(
+            in_size=self.custom_config["hidden_state_size"],
             out_size=1,
             initializer=normc_initializer(1.0),
             activation_fn=None,
         )
 
         # Policy Network
-        self.actor_branch = SlimFC(
-            in_size=full_feature_output,
+        self.p_branch = SlimFC(
+            in_size=self.custom_config["hidden_state_size"],
             out_size=num_outputs,
             initializer=normc_initializer(0.01),
             activation_fn=None,
@@ -95,27 +100,43 @@ class CrowdSimNet(TorchModelV2, nn.Module):
     def forward(self, input_dict: Dict[str, TensorType],
                 state: List[TensorType],
                 seq_lens: TensorType) -> (TensorType, List[TensorType]):
-        state, grid = tuple(input_dict.values())
+        observation = input_dict['obs']['obs']
+        inf_mask = None
+        if isinstance(observation, dict):
+            flat_inputs = {k: v.float() for k, v in observation.items()}
+        else:
+            flat_inputs = observation.float()
+        self.inputs = flat_inputs
+        if self.custom_config["global_state_flag"] or self.custom_config["mask_flag"]:
+            # TODO: Mask untested.
+            # Convert action_mask into a [0.0 || -inf]-type mask.
+            if self.custom_config["mask_flag"]:
+                action_mask = input_dict["obs"]["action_mask"]
+                inf_mask = torch.clamp(torch.log(action_mask), min=FLOAT_MIN)
+        # TODO: does not support 1D state
         # slice the state to two parts, the last 4 dim is the emergency coordinate
-        emergency = state[:, -self.custom_config['emergency_dim']:]
-        status = state[:, :-self.custom_config['emergency_dim']]
+        status = self.inputs[Constants.VECTOR_STATE][..., :-self.emergency_dim]
+        emergency = self.inputs[Constants.VECTOR_STATE][..., -self.emergency_dim:]
         # encode the three branches
-        status = self.status_encoder(status)
+        status = self.status_grid_encoder({Constants.VECTOR_STATE: status,
+                                           Constants.IMAGE_STATE: flat_inputs[Constants.IMAGE_STATE]})
         emergency = self.emergency_encoder(emergency)
-        grid = self.grid_encoder(grid)
         # merge the three branches
-        x = torch.cat((status, emergency, grid), dim=1)
-        x = self.merge_branch(x)
+        self._features = torch.cat((status, emergency), dim=1)
+        x = self.merge_branch(self._features)
         # through actor branch
-        logits = self.actor_branch(x)
-        return logits
+        logits = self.p_branch(x)
+        if self.custom_config["mask_flag"]:
+            logits = logits + inf_mask
+        return logits, state
 
     @override(TorchModelV2)
     def value_function(self) -> TensorType:
         assert self._features is not None, "must call forward() first"
         B = self._features.shape[0]
-        x = self.vf_encoder(self.inputs)
-
+        # x = self.vf_encoder(self.inputs)
+        x = self.merge_branch(self._features)
+        # WARNING: value function now shares encoder with policy, does not know the implication.
         if self.q_flag:
             return torch.reshape(self.vf_branch(x), [B, -1])
         else:

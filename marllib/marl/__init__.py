@@ -322,14 +322,16 @@ def build_model(
         model_config = get_model_config("rnn")
     elif model_preference["core_arch"] in ["mlp"]:
         model_config = get_model_config("mlp")
+    elif model_preference["core_arch"] in ["crowdsim_net"]:
+        model_config = get_model_config("crowdsim_net")
     else:
         raise NotImplementedError("{} not supported agent model arch".format(model_preference["core_arch"]))
 
     if isinstance(environment[0].observation_space.spaces['obs'], spaces.Dict):
-        # if isinstance(environment[0], RLlibCUDACrowdSim) and:
-        #     encoder = "crowdsim_encoder"
-        # else:
-        encoder = "mix_encoder"
+        if isinstance(environment[0], RLlibCUDACrowdSim) and model_preference['core_arch'] in ['crowdsim_net']:
+            encoder = "crowdsim_encoder"
+        else:
+            encoder = "mix_encoder"
     else:
         if len(environment[0].observation_space.spaces["obs"].shape) == 1:
             encoder = "fc_encoder"
