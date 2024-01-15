@@ -147,7 +147,7 @@ class BaseEncoder(nn.Module, MixInputEncoderMixin):
     def forward(self, inputs: Union[TensorType, dict]) -> (TensorType, List[TensorType]):
         if self.mix_input:
             state, grid = tuple(inputs.values())
-            logging.debug(f"encoder input shape:{state.shape},{grid.shape}")
+            # logging.debug(f"encoder input shape:{state.shape},{grid.shape}")
             output = torch.cat([self.encoder['fc'](state),
                                 self.cnn_forward(self.encoder['cnn'], grid)], dim=-1)
 
@@ -159,7 +159,7 @@ class BaseEncoder(nn.Module, MixInputEncoderMixin):
             else:
                 self.inputs = inputs.reshape(inputs.shape[0], -1)
                 output = self.encoder(inputs)
-        logging.debug(f"encoder output shape:{output.shape}")
+        # logging.debug(f"encoder output shape:{output.shape}")
         return output
 
     def cnn_forward(self, cnn_network: nn.Module, inputs):
