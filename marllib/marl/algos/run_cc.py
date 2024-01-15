@@ -56,7 +56,7 @@ def restore_config_update(exp_info, run_config, stop_config):
         if 'render' in exp_info['restore_path']:
             render_config = {
                 "evaluation_interval": 1,
-                "evaluation_num_episodes": 9,
+                "evaluation_num_episodes": 8,
                 "evaluation_num_workers": 0,
                 "evaluation_config": {
                     "record_env": False,

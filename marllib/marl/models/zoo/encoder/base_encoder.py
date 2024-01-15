@@ -147,19 +147,19 @@ class BaseEncoder(nn.Module, MixInputEncoderMixin):
     def forward(self, inputs: Union[TensorType, dict]) -> (TensorType, List[TensorType]):
         if self.mix_input:
             state, grid = tuple(inputs.values())
-            logging.debug(f"encoder input shape:{state.shape},{grid.shape}")
+            # logging.debug(f"encoder input shape:{state.shape},{grid.shape}")
             output = torch.cat([self.encoder['fc'](state),
                                 self.cnn_forward(self.encoder['cnn'], grid)], dim=-1)
 
         else:
             # Compute the unmasked logits.
-            logging.debug(f"encoder input shape:{inputs.shape}")
+            # logging.debug(f"encoder input shape:{inputs.shape}")
             if "conv_layer" in self.custom_config["model_arch_args"]:
                 output = self.cnn_forward(self.encoder, inputs)
             else:
                 self.inputs = inputs.reshape(inputs.shape[0], -1)
                 output = self.encoder(inputs)
-        logging.debug(f"encoder output shape:{output.shape}")
+        # logging.debug(f"encoder output shape:{output.shape}")
         return output
 
     def cnn_forward(self, cnn_network: nn.Module, inputs):
