@@ -1,6 +1,7 @@
 # MIT License
 import logging
 
+import numpy as np
 # Copyright (c) 2023 Replicable-MARL
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -30,6 +31,7 @@ from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.typing import Dict, TensorType, List
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
+from warp_drive.utils.constants import Constants
 
 torch, nn = try_import_torch()
 
@@ -153,6 +155,90 @@ class BaseMLP(TorchModelV2, nn.Module, BaseMLPMixin):
 
 
 class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
+    def __init__(
+            self,
+            obs_space,
+            action_space,
+            num_outputs,
+            model_config,
+            name,
+            **kwargs,
+    ):
+        TorchModelV2.__init__(self, obs_space, action_space, num_outputs,
+                              model_config, name)
+        nn.Module.__init__(self)
+        BaseMLPMixin.__init__(self)
+
+        # decide the model arch
+        self.inputs = None
+        self.custom_config = model_config["custom_model_config"]
+        self.full_obs_space = getattr(obs_space, "original_space", obs_space)
+        self.n_agents = self.custom_config["num_agents"]
+        self.activation = model_config.get("fcnet_activation")
+
+        # encoder
+        self.p_encoder = BaseEncoder(model_config, self.full_obs_space)
+        self.vf_encoder = BaseEncoder(model_config, self.full_obs_space)
+
+        self.p_branch = SlimFC(
+            in_size=self.p_encoder.output_dim,
+            out_size=num_outputs,
+            initializer=normc_initializer(0.01),
+            activation_fn=None)
+
+        # self.vf_encoder = nn.Sequential(*copy.deepcopy(layers))
+        self.vf_branch = SlimFC(
+            in_size=self.vf_encoder.output_dim,
+            out_size=1,
+            initializer=normc_initializer(0.01),
+            activation_fn=None)
+        logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
+        logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
+        # Holds the current "base" output (before logits layer).
+        self._features = None
+        # Holds the last input, in case value branch is separate.
+        self._last_obs = None
+        self.q_flag = False
+
+        self.actors = [self.p_encoder, self.p_branch]
+        self.critics = [self.vf_encoder, self.vf_branch]
+
+        self.emergency_selector = nn.Sequential(SlimFC(
+            in_size=self.p_encoder.output_dim,
+            out_size=self.custom_config["emergency_dim"] / self.custom_config['emergency_feature_num'],
+            initializer=normc_initializer(0.01),
+            activation_fn=None),
+            nn.Softmax(dim=1))
+        self.actor_initialized_parameters = self.actor_parameters()
+        if wandb.run is not None:
+            wandb.watch(models=tuple(self.actors), log='all')
+
+    @override(TorchModelV2)
+    def forward(self, input_dict: Dict[str, TensorType],
+                state: List[TensorType],
+                seq_lens: TensorType) -> (TensorType, List[TensorType]):
+        # extract emergency (last 6 features) from obs, get softmax score
+        observation = input_dict['obs']['obs']
+        inf_mask = None
+        if isinstance(observation, dict):
+            flat_inputs = {k: v.float() for k, v in observation.items()}
+        else:
+            flat_inputs = observation.float()
+        emergency = flat_inputs[Constants.VECTOR_STATE][:, -self.custom_config["emergency_dim"]:]
+        emergency_score = self.emergency_selector(emergency)
+        # select the max score and put this emergency PoI into the obs
+        emergency_index = torch.argmax(emergency_score, dim=1)
+        flat_inputs[Constants.VECTOR_STATE] = np.concatenate(
+            flat_inputs[Constants.VECTOR_STATE][:, :-self.custom_config["emergency_dim"]],
+            emergency[emergency_index:emergency_index + 1], axis=1)
+        return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
+
+    @override(TorchModelV2)
+    def value_function(self) -> TensorType:
+        return BaseMLPMixin.value_function(self)
+
+
+class CrowdSimAttention(TorchModelV2, nn.Module, BaseMLPMixin):
     def __init__(
             self,
             obs_space,

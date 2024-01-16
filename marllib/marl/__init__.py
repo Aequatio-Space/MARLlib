@@ -28,7 +28,7 @@ from marllib.marl.algos.scripts import POlICY_REGISTRY
 from marllib.envs.base_env import ENV_REGISTRY
 from marllib.envs.global_reward_env import COOP_ENV_REGISTRY
 from marllib.marl.models import BaseRNN, BaseMLP, CentralizedCriticRNN, CentralizedCriticMLP, ValueDecompRNN, \
-    ValueDecompMLP, JointQMLP, JointQRNN, DDPGSeriesRNN, DDPGSeriesMLP, CrowdSimNet
+    ValueDecompMLP, JointQMLP, JointQRNN, DDPGSeriesRNN, DDPGSeriesMLP, CrowdSimMLP
 from envs.crowd_sim.crowd_sim import RLlibCUDACrowdSim
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from ray.tune import register_env
@@ -304,7 +304,7 @@ def build_model(
             if model_preference["core_arch"] in ["gru", "lstm"]:
                 model_class = BaseRNN
             elif model_preference["core_arch"] in ["crowdsim_net"]:
-                model_class = CrowdSimNet
+                model_class = CrowdSimMLP
             else:
                 model_class = BaseMLP
         elif algorithm.algo_type == "CC":
@@ -328,10 +328,10 @@ def build_model(
         raise NotImplementedError("{} not supported agent model arch".format(model_preference["core_arch"]))
 
     if isinstance(environment[0].observation_space.spaces['obs'], spaces.Dict):
-        if isinstance(environment[0], RLlibCUDACrowdSim) and model_preference['core_arch'] in ['crowdsim_net']:
-            encoder = "crowdsim_encoder"
-        else:
-            encoder = "mix_encoder"
+        # if isinstance(environment[0], RLlibCUDACrowdSim) and model_preference['core_arch'] in ['crowdsim_net']:
+        #     encoder = "crowdsim_encoder"
+        # else:
+        encoder = "mix_encoder"
     else:
         if len(environment[0].observation_space.spaces["obs"].shape) == 1:
             encoder = "fc_encoder"

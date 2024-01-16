@@ -20,7 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from .base_mlp import BaseMLP
+from .base_mlp import BaseMLP, CrowdSimMLP
 from .cc_mlp import CentralizedCriticMLP
 from .ddpg_mlp import DDPGSeriesMLP
 from .jointQ_mlp import JointQMLP
