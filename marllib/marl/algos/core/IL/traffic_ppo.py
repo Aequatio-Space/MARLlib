@@ -22,6 +22,7 @@ torch, nn = try_import_torch()
 
 logger = logging.getLogger(__name__)
 
+VIRTUAL_OBS = 'virtual_obs'
 
 def compute_gae_and_intrinsic_for_sample_batch(
         policy: Policy,
@@ -70,27 +71,15 @@ def compute_gae_and_intrinsic_for_sample_batch(
         num_agents = len(other_agent_batches) + 1
     else:
         num_agents = 1
-    VIRTUAL_OBS = 'virtual_obs'
+
     agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 4]
     try:
         emergency_position = sample_batch[VIRTUAL_OBS][..., 20:22]
     except KeyError:
         emergency_position = sample_batch[SampleBatch.OBS][..., 20:22]
-    # mask out penalty where emergency_positions are (0,0), which indicates the agent is not in the emergency.
-    mask = emergency_position.sum(axis=-1) != 0
-    distances = np.linalg.norm(agents_position - emergency_position, axis=-1)
-    # find [aoi, (x,y)] array in state
     emergency_states = sample_batch[SampleBatch.OBS][..., 154:190].reshape(-1, 9, 4)
-    aois, all_emergencies_position = emergency_states[..., 2], np.stack(
-        [emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
-    # find the index of emergency with all_emergencies_position
-    indices = np.zeros((len(emergency_position)), dtype=np.int32)
-    for i, this_timestep_pos in enumerate(emergency_position):
-        if mask[i]:
-            find_index = np.where(np.all(all_emergencies_position[i] == this_timestep_pos, axis=1))[0]
-            if len(find_index) > 0:
-                indices[i] = find_index[0]
-    sample_batch[SampleBatch.REWARDS] -= distances * mask * aois[np.arange(len(aois)), indices]
+    intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
+    sample_batch[SampleBatch.REWARDS] += intrinsic
 
     # Adds the policy logits, VF preds, and advantages to the batch,
     # using GAE ("generalized advantage estimation") or not.
@@ -103,6 +92,25 @@ def compute_gae_and_intrinsic_for_sample_batch(
         use_critic=policy.config.get("use_critic", True))
 
     return batch
+
+
+def calculate_intrinsic(agents_position, emergency_position, emergency_states):
+    # mask out penalty where emergency_positions are (0,0), which indicates the agent is not in the emergency.
+    mask = emergency_position.sum(axis=-1) != 0
+    distances = np.linalg.norm(agents_position - emergency_position, axis=-1)
+    # find [aoi, (x,y)] array in state
+    aois, all_emergencies_position = emergency_states[..., 2], np.stack(
+        [emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
+    # find the index of emergency with all_emergencies_position
+    indices = np.zeros((len(emergency_position)), dtype=np.int32)
+    for i, this_timestep_pos in enumerate(emergency_position):
+        if mask[i]:
+            find_index = np.where(np.all(all_emergencies_position[i] == this_timestep_pos, axis=1))[0]
+            if len(find_index) > 0:
+                indices[i] = find_index[0]
+    intinsic_reward = -distances * mask * aois[np.arange(len(aois)), indices]
+    return intinsic_reward
+
 
 def ppo_surrogate_loss(
         policy: Policy, model: ModelV2,
@@ -124,25 +132,24 @@ def ppo_surrogate_loss(
     logits, state = model(train_batch)
     curr_action_dist = dist_class(logits, model)
 
-    # # RNN case: Mask away 0-padded chunks at end of time axis.
-    # if state:
-    #     B = len(train_batch[SampleBatch.SEQ_LENS])
-    #     max_seq_len = logits.shape[0] // B
-    #     mask = sequence_mask(
-    #         train_batch[SampleBatch.SEQ_LENS],
-    #         max_seq_len,
-    #         time_major=model.is_time_major())
-    #     mask = torch.reshape(mask, [-1])
-    #     num_valid = torch.sum(mask)
-    #
-    #     def reduce_mean_valid(t):
-    #         return torch.sum(t[mask]) / num_valid
-    #
-    # # non-RNN case: No masking.
-    # else:
-    #     mask = None
-    #     reduce_mean_valid = torch.mean
-    reduce_mean_valid = torch.mean
+    # RNN case: Mask away 0-padded chunks at end of time axis.
+    if state:
+        B = len(train_batch[SampleBatch.SEQ_LENS])
+        max_seq_len = logits.shape[0] // B
+        mask = sequence_mask(
+            train_batch[SampleBatch.SEQ_LENS],
+            max_seq_len,
+            time_major=model.is_time_major())
+        mask = torch.reshape(mask, [-1])
+        num_valid = torch.sum(mask)
+
+        def reduce_mean_valid(t):
+            return torch.sum(t[mask]) / num_valid
+
+    # non-RNN case: No masking.
+    else:
+        mask = None
+        reduce_mean_valid = torch.mean
 
     prev_action_dist = dist_class(train_batch[SampleBatch.ACTION_DIST_INPUTS],
                                   model)
@@ -180,6 +187,9 @@ def ppo_surrogate_loss(
     else:
         vf_loss = mean_vf_loss = 0.0
 
+    # regression training of predictor
+    virtual_obs = train_batch[VIRTUAL_OBS]
+
     total_loss = reduce_mean_valid(-surrogate_loss +
                                    policy.kl_coeff * action_kl +
                                    policy.config["vf_loss_coeff"] * vf_loss -
@@ -204,6 +214,7 @@ def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
     extra_dict = {SampleBatch.VF_PREDS: model.value_function()}
     try:
         extra_dict['virtual_obs'] = model.last_virtual_obs
+        # extra_dict['predicted_values'] = model.last_predicted_values
     except AttributeError:
         pass
     return extra_dict
