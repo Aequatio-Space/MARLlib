@@ -23,6 +23,8 @@
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from ray.rllib.agents.ppo.ppo_torch_policy import PPOTorchPolicy
 from ray.rllib.agents.ppo.ppo import DEFAULT_CONFIG as PPO_CONFIG
+from marllib.marl.algos.core.IL.traffic_ppo import (
+    compute_gae_and_intrinsic_for_sample_batch, ppo_surrogate_loss, extra_action_out_fn)
 
 ###########
 ### PPO ###
@@ -32,12 +34,14 @@ from ray.rllib.agents.ppo.ppo import DEFAULT_CONFIG as PPO_CONFIG
 IPPOTorchPolicy = PPOTorchPolicy.with_updates(
     name="IPPOTorchPolicy",
     get_default_config=lambda: PPO_CONFIG,
+    postprocess_fn=compute_gae_and_intrinsic_for_sample_batch,
+    loss_fn=ppo_surrogate_loss,
+    extra_action_out_fn=extra_action_out_fn,
 )
 
 TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
     name="TrafficPPOTorchPolicy",
     get_default_config=lambda: PPO_CONFIG,
-    # loss_fn=traffic_ppo_loss,
 )
 
 def get_policy_class_ppo(config_):

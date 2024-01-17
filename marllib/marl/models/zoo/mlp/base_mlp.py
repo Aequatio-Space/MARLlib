@@ -170,11 +170,21 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         BaseMLPMixin.__init__(self)
 
         # decide the model arch
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.inputs = None
         self.custom_config = model_config["custom_model_config"]
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
         self.activation = model_config.get("fcnet_activation")
+
+        self._is_train = False
+
+        self.emergency_dim = self.custom_config["emergency_dim"]
+        self.emergency_feature_num = self.custom_config["emergency_feature_num"]
+        self.num_envs = 500
+        self.emergency_mode = torch.zeros((self.n_agents * self.num_envs), device=self.device)
+        self.emergency_target = torch.full((self.n_agents * self.num_envs, 2), -1,
+                                           dtype=torch.float32, device=self.device)
 
         # encoder
         self.p_encoder = BaseEncoder(model_config, self.full_obs_space)
@@ -199,39 +209,103 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         # Holds the last input, in case value branch is separate.
         self._last_obs = None
         self.q_flag = False
-
+        self.last_virtual_obs = None
         self.actors = [self.p_encoder, self.p_branch]
         self.critics = [self.vf_encoder, self.vf_branch]
-
-        self.emergency_selector = nn.Sequential(SlimFC(
-            in_size=self.p_encoder.output_dim,
-            out_size=self.custom_config["emergency_dim"] / self.custom_config['emergency_feature_num'],
-            initializer=normc_initializer(0.01),
-            activation_fn=None),
-            nn.Softmax(dim=1))
         self.actor_initialized_parameters = self.actor_parameters()
+        self.distance_predictor = nn.Sequential(
+            SlimFC(
+                in_size=self.full_obs_space['obs']['agents_state'].shape[0],
+                out_size=64,
+                initializer=normc_initializer(0.01),
+                activation_fn=self.activation),
+            SlimFC(
+                in_size=64,
+                out_size=1,
+                initializer=normc_initializer(0.01),
+                activation_fn=self.activation)
+        )
+        # Note, the final activation cannot be tanh, check.
+
         if wandb.run is not None:
             wandb.watch(models=tuple(self.actors), log='all')
+
+    def train(self):
+        self._is_train = True
+
+    def eval(self):
+        self._is_train = False
+
 
     @override(TorchModelV2)
     def forward(self, input_dict: Dict[str, TensorType],
                 state: List[TensorType],
                 seq_lens: TensorType) -> (TensorType, List[TensorType]):
-        # extract emergency (last 6 features) from obs, get softmax score
         observation = input_dict['obs']['obs']
         inf_mask = None
         if isinstance(observation, dict):
             flat_inputs = {k: v.float() for k, v in observation.items()}
         else:
             flat_inputs = observation.float()
-        emergency = flat_inputs[Constants.VECTOR_STATE][:, -self.custom_config["emergency_dim"]:]
-        emergency_score = self.emergency_selector(emergency)
-        # select the max score and put this emergency PoI into the obs
-        emergency_index = torch.argmax(emergency_score, dim=1)
-        flat_inputs[Constants.VECTOR_STATE] = np.concatenate(
-            flat_inputs[Constants.VECTOR_STATE][:, :-self.custom_config["emergency_dim"]],
-            emergency[emergency_index:emergency_index + 1], axis=1)
-        return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
+        if not self._is_train:
+            emergency_status = input_dict['obs']['state'][Constants.VECTOR_STATE][...,
+                               self.n_agents * (self.n_agents + 4):].reshape(-1, 9, 4)
+            emergency_xy = torch.stack([emergency_status[..., 0], emergency_status[..., 1]], axis=-1).to(self.device)
+            target_coverage = emergency_status[..., 3]
+            all_obs = flat_inputs[Constants.VECTOR_STATE]
+            predicted_values = torch.zeros((len(all_obs),), device=self.device)
+            logging.debug(f"Mode: {self.emergency_mode[:4]}")
+            if torch.sum(all_obs) > 0:
+                for i, (this_coverage, this_xy) in enumerate(zip(target_coverage, emergency_xy)):
+                    # logging.debug(f"index: {i}")
+                    if self.emergency_mode[i]:
+                        # check emergency coverage
+                        index = torch.nonzero(torch.all(this_xy == self.emergency_target[i], dim=1))
+                        if len(index) > 0 and this_coverage[index]:
+                            # target is covered, reset emergency mode
+                            self.emergency_mode[i] = 0
+                            self.emergency_target[i] = -1
+                        else:
+                            # fill in original target
+                            all_obs[i][20:22] = self.emergency_target[i]
+                        predicted_values[i] = -1
+                    else:
+                        valid_emergencies = this_coverage == 0
+                        valid_emergencies_xy = this_xy[valid_emergencies]
+                        num_of_emergency = len(valid_emergencies_xy)
+                        if num_of_emergency > 0:
+                            # query predictor for new emergency target
+                            queries_obs = all_obs[i].repeat(len(valid_emergencies_xy), 1)
+                            queries_obs[..., 20:22] = valid_emergencies_xy.clone().detach()
+                            with torch.no_grad():
+                                batch_predicted_values = self.distance_predictor(queries_obs)
+                            # find the min distance
+                            min_index = torch.argmin(batch_predicted_values)
+                            # set emergency mode
+                            self.emergency_mode[i] = 1
+                            # set emergency target
+                            self.emergency_target[i] = valid_emergencies_xy[min_index].clone().detach()
+                            # fill in emergency target
+                            all_obs[i][20:22] = self.emergency_target[i]
+                            predicted_values[i] = batch_predicted_values[min_index]
+                        else:
+                            predicted_values[i] = -1
+                input_dict['obs']['obs']['agents_state'] = all_obs
+
+                logging.debug(f"Selected Target: {self.emergency_target[:4]}")
+            try:
+                if torch.all(input_dict['dones']):
+                    self.emergency_mode = torch.zeros((self.n_agents * self.num_envs), device=self.device)
+                    self.emergency_target = torch.full((self.n_agents * self.num_envs, 2), -1,
+                                                       dtype=torch.float32, device=self.device)
+            except KeyError:
+                pass
+            self.last_virtual_obs = input_dict['obs']['obs']['agents_state']
+            state.append(predicted_values)
+        else:
+            input_dict['obs']['obs']['agents_state'] = input_dict['virtual_obs']
+        output, state = BaseMLPMixin.forward(self, input_dict, state, seq_lens)
+        return output, state
 
     @override(TorchModelV2)
     def value_function(self) -> TensorType:
