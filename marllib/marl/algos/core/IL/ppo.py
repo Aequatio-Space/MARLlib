@@ -34,9 +34,9 @@ from marllib.marl.algos.core.IL.traffic_ppo import (
 IPPOTorchPolicy = PPOTorchPolicy.with_updates(
     name="IPPOTorchPolicy",
     get_default_config=lambda: PPO_CONFIG,
-    postprocess_fn=compute_gae_and_intrinsic_for_sample_batch,
-    loss_fn=ppo_surrogate_loss,
-    extra_action_out_fn=extra_action_out_fn,
+    # postprocess_fn=compute_gae_and_intrinsic_for_sample_batch,
+    # loss_fn=ppo_surrogate_loss,
+    # extra_action_out_fn=extra_action_out_fn,
 )
 
 TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
