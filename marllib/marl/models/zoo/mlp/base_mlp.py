@@ -282,7 +282,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         if len(index) > 0 and this_coverage[index]:
                             # target is covered, reset emergency mode
                             logging.debug(f"Emergency target ({self.emergency_target[i][0].item()},"
-                                          f"{self.emergency_target[i][1].item()}) is covered by agent {i % self.n_agents}")
+                                          f"{self.emergency_target[i][1].item()}) is covered by agent")
                             self.emergency_mode[i] = 0
                             self.emergency_target[i] = -1
                         else:
@@ -309,7 +309,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                             all_obs[i][20:22] = self.emergency_target[i]
                             predicted_values[i] = batch_predicted_values[min_index]
                             logging.debug(
-                                f"agent {i % self.n_agents} selected Target:"
+                                f"agent selected Target:"
                                 f"({self.emergency_target[i][0].item()},{self.emergency_target[i][1].item()}) "
                                 f"with metric value {predicted_values[i]}"
                             )
