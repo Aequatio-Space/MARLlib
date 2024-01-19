@@ -25,4 +25,5 @@ grid_dim: (1, 10, 10)
 emergency_feature_num: 2
 emergency_dim: 6
 hidden_state_size: 32
+num_envs: 500
 selector_type: 'NN'

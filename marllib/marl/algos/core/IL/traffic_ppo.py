@@ -12,6 +12,7 @@ from ray.rllib.evaluation.postprocessing import Postprocessing, compute_advantag
 from ray.rllib.models.modelv2 import ModelV2
 from ray.rllib.models.torch.torch_action_dist import TorchDistributionWrapper
 from ray.rllib.policy.policy import Policy
+from ray.rllib.agents.ppo.ppo_torch_policy import kl_and_loss_stats, vf_preds_fetches, ppo_surrogate_loss
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.torch_ops import apply_grad_clipping, \
@@ -27,6 +28,14 @@ VIRTUAL_OBS = 'virtual_obs'
 
 # dirty hack, should be removed later
 episode_length = 120
+
+
+def mean_length(list_of_tensors: list[torch.Tensor]) -> torch.Tensor:
+    lengths = [len(tensor) for tensor in list_of_tensors]
+    if len(lengths) > 0:
+        return torch.tensor(lengths).float().mean()
+    else:
+        return torch.tensor(0.0)
 
 
 def find_ascending_sequences(arr_tensor: torch.Tensor, min_length=5) -> list[torch.Tensor]:
@@ -160,7 +169,7 @@ def calculate_intrinsic(agents_position: Union[torch.Tensor, np.ndarray],
     return intrinsic
 
 
-def ppo_surrogate_loss(
+def add_regress_loss(
         policy: Policy, model: ModelV2,
         dist_class: Type[TorchDistributionWrapper],
         train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
@@ -177,126 +186,91 @@ def ppo_surrogate_loss(
             of loss tensors.
     """
     # regression training of predictor
-    virtual_obs = train_batch[VIRTUAL_OBS]
-    relabel_targets = find_ascending_sequences(train_batch['intrinsic_rewards'])
-    num_agents = 4
-    predictor_inputs = []
-    predictor_labels = []
-    train_batch_device = train_batch['intrinsic_rewards'].device
-    for fragment in relabel_targets:
-        obs_to_be_relabeled = virtual_obs[fragment]
-        agent_position = obs_to_be_relabeled[..., num_agents + 2: num_agents + 4].to(model.device)
-        emergency_position = obs_to_be_relabeled[..., 20:22].to(model.device)
-        # ((250/7910)^2+(250/6960)^2)^0.5 = 0.048, the coverage distance example
-        if torch.norm(emergency_position[-1] - agent_position[-1]) > 0.05:
-            # relabel needed
-            emergency_position = agent_position[-1].repeat(len(emergency_position), 1).to(model.device)
-            obs_to_be_relabeled[..., 20:22] = agent_position[-1]
-            train_batch['intrinsic_rewards'][fragment] = calculate_intrinsic(
-                agent_position, emergency_position, torch.zeros(1, device=model.device),
-                fake=True, device=model.device).to(torch.float32).to(train_batch_device)
-            train_batch['rewards'][fragment] = (train_batch['original_rewards'][fragment] +
-                                                train_batch['intrinsic_rewards'][fragment])
-            # additional complete bonus
-            train_batch['rewards'][fragment[-1]] += len(fragment) * 5 / episode_length
-            train_batch[VIRTUAL_OBS][fragment] = obs_to_be_relabeled
-        # for successful trajectories, the aoi is not 100% correct (smaller than actual), check if needed.
-        predictor_inputs.append(obs_to_be_relabeled[0])
-        predictor_labels.append(len(fragment) / episode_length)
-    if len(predictor_inputs) > 0:
-        predictor_inputs = torch.stack(predictor_inputs).to(train_batch_device)
-        predictor_labels = torch.tensor(predictor_labels).float().to(train_batch_device)
-        regress_result = model.selector(predictor_inputs).squeeze(-1)
-        # L2 Loss
-        regress_loss = torch.nn.MSELoss()(regress_result, predictor_labels).to(model.device)
+    if model.selector_type == 'NN':
+        virtual_obs = train_batch[VIRTUAL_OBS]
+        relabel_targets = find_ascending_sequences(train_batch['intrinsic_rewards'])
+        num_agents = 4
+        predictor_inputs = []
+        predictor_labels = []
+        mean_relabel_percentage = torch.tensor(0.0)
+        train_batch_device = train_batch['intrinsic_rewards'].device
+        for fragment in relabel_targets:
+            obs_to_be_relabeled = virtual_obs[fragment]
+            agent_position = obs_to_be_relabeled[..., num_agents + 2: num_agents + 4].to(model.device)
+            emergency_position = obs_to_be_relabeled[..., 20:22].to(model.device)
+            # ((250/7910)^2+(250/6960)^2)^0.5 = 0.048, the coverage distance example
+            if torch.norm(emergency_position[-1] - agent_position[-1]) > 0.05:
+                mean_relabel_percentage += 1
+                # relabel needed
+                emergency_position = agent_position[-1].repeat(len(emergency_position), 1).to(model.device)
+                obs_to_be_relabeled[..., 20:22] = agent_position[-1]
+                train_batch['intrinsic_rewards'][fragment] = calculate_intrinsic(
+                    agent_position, emergency_position, torch.zeros(1, device=model.device),
+                    fake=True, device=model.device).to(torch.float32).to(train_batch_device)
+                train_batch['rewards'][fragment] = (train_batch['original_rewards'][fragment] +
+                                                    train_batch['intrinsic_rewards'][fragment])
+                # additional complete bonus
+                train_batch['rewards'][fragment[-1]] += len(fragment) * 5 / episode_length
+                train_batch[VIRTUAL_OBS][fragment] = obs_to_be_relabeled
+            # for successful trajectories, the aoi is not 100% correct (smaller than actual), check if needed.
+            predictor_inputs.append(obs_to_be_relabeled[0])
+            predictor_labels.append(len(fragment) / episode_length)
+        len_labels = len(predictor_labels)
+        mean_relabel_percentage = mean_relabel_percentage / len_labels if len_labels > 0 else torch.tensor(0.0)
+        if len_labels > 0:
+            predictor_inputs = torch.stack(predictor_inputs).to(train_batch_device)
+            predictor_labels = torch.tensor(predictor_labels).float().to(train_batch_device)
+            regress_result = model.selector(predictor_inputs).squeeze(-1)
+            # L2 Loss
+            regress_loss = torch.nn.MSELoss()(regress_result, predictor_labels).to(model.device)
+        else:
+            regress_loss = torch.tensor(0.0).to(model.device)
+        mean_label_count = torch.tensor(len(predictor_inputs), dtype=torch.float32)
+        mean_valid_fragment_length = mean_length(relabel_targets)
     else:
-        regress_loss = torch.tensor(0.0).to(model.device)
+        regress_loss = mean_relabel_percentage = torch.tensor(0.0).to(model.device)
+        mean_label_count = mean_valid_fragment_length = torch.tensor(0.0, dtype=torch.float32)
 
     mean_regress_loss = torch.mean(regress_loss)
     model.train()
-    logits, state = model(train_batch)
-    curr_action_dist = dist_class(logits, model)
-
-    # RNN case: Mask away 0-padded chunks at end of time axis.
-    if state:
-        B = len(train_batch[SampleBatch.SEQ_LENS])
-        max_seq_len = logits.shape[0] // B
-        mask = sequence_mask(
-            train_batch[SampleBatch.SEQ_LENS],
-            max_seq_len,
-            time_major=model.is_time_major())
-        mask = torch.reshape(mask, [-1])
-        num_valid = torch.sum(mask)
-
-        def reduce_mean_valid(t):
-            return torch.sum(t[mask]) / num_valid
-
-    # non-RNN case: No masking.
-    else:
-        mask = None
-        reduce_mean_valid = torch.mean
-
-    prev_action_dist = dist_class(train_batch[SampleBatch.ACTION_DIST_INPUTS],
-                                  model)
-
-    logp_ratio = torch.exp(
-        curr_action_dist.logp(train_batch[SampleBatch.ACTIONS]) -
-        train_batch[SampleBatch.ACTION_LOGP])
-    action_kl = prev_action_dist.kl(curr_action_dist).to(model.device)
-    mean_kl_loss = reduce_mean_valid(action_kl)
-
-    curr_entropy = curr_action_dist.entropy().to(model.device)
-    mean_entropy = reduce_mean_valid(curr_entropy)
-
-    surrogate_loss = torch.min(
-        train_batch[Postprocessing.ADVANTAGES] * logp_ratio,
-        train_batch[Postprocessing.ADVANTAGES] * torch.clamp(
-            logp_ratio, 1 - policy.config["clip_param"],
-            1 + policy.config["clip_param"])).to(model.device)
-    mean_policy_loss = reduce_mean_valid(-surrogate_loss)
-
-    # Compute a value function loss.
-    if policy.config["use_critic"]:
-        prev_value_fn_out = train_batch[SampleBatch.VF_PREDS]
-        value_fn_out = model.value_function()
-        vf_loss1 = torch.pow(
-            value_fn_out - train_batch[Postprocessing.VALUE_TARGETS], 2.0)
-        vf_clipped = prev_value_fn_out + torch.clamp(
-            value_fn_out - prev_value_fn_out, -policy.config["vf_clip_param"],
-            policy.config["vf_clip_param"])
-        vf_loss2 = torch.pow(
-            vf_clipped - train_batch[Postprocessing.VALUE_TARGETS], 2.0)
-        vf_loss = torch.max(vf_loss1, vf_loss2).to(model.device)
-        mean_vf_loss = reduce_mean_valid(vf_loss)
-    # Ignore the value function.
-    else:
-        vf_loss = mean_vf_loss = 0.0
-
-    total_loss = reduce_mean_valid(-surrogate_loss +
-                                   policy.kl_coeff * action_kl +
-                                   policy.config["vf_loss_coeff"] * vf_loss -
-                                   policy.entropy_coeff * curr_entropy + regress_loss)
+    total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
+    regress_weight = 1.0
+    total_loss += regress_weight * mean_regress_loss.to(total_loss.device)
     model.eval()
     # Store values for stats function in model (tower), such that for
     # multi-GPU, we do not override them during the parallel loss phase.
     model.tower_stats["total_loss"] = total_loss
-    model.tower_stats["mean_policy_loss"] = mean_policy_loss
-    model.tower_stats["mean_vf_loss"] = mean_vf_loss
-    model.tower_stats["vf_explained_var"] = explained_variance(
-        train_batch[Postprocessing.VALUE_TARGETS], model.value_function())
-    model.tower_stats["mean_entropy"] = mean_entropy
-    model.tower_stats["mean_kl_loss"] = mean_kl_loss
-    model.tower_stats['mean_regress_loss'] = mean_regress_loss
+    for item in ['mean_regress_loss', 'mean_label_count',
+                 'mean_valid_fragment_length', 'mean_relabel_percentage']:
+        model.tower_stats[item] = locals()[item]
 
     return total_loss
 
 
 def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
     """Attach virtual obs to sample batch for Intrinsic reward calculation."""
-    extra_dict = {SampleBatch.VF_PREDS: model.value_function()}
+    extra_dict = vf_preds_fetches(policy, input_dict, state_batches, model, action_dist)
     try:
         extra_dict['virtual_obs'] = model.last_virtual_obs
         # extra_dict['predicted_values'] = model.last_predicted_values
     except AttributeError:
         pass
     return extra_dict
+
+
+def kl_and_loss_stats_with_regress(policy: Policy,
+                                   train_batch: SampleBatch) -> Dict[str, TensorType]:
+    """
+    Add regress loss stats to the original stats.
+    """
+    original_dict = kl_and_loss_stats(policy, train_batch)
+    for item in ['regress_loss', 'label_count', 'valid_fragment_length', 'relabel_percentage']:
+        original_dict[item] = torch.mean(torch.stack(policy.get_tower_stats("mean_" + item)))
+    for model in policy.model_gpu_towers:
+        if model.last_emergency_mode is not None:
+            for i in range(model.n_agents):
+                original_dict[f'agent_{i}_mode'] = model.last_emergency_mode[i]
+                original_dict[f'agent_{i}_target_x'] = model.last_emergency_target[i][0]
+                original_dict[f'agent_{i}_target_y'] = model.last_emergency_target[i][1]
+        break
+    return original_dict
