@@ -38,6 +38,9 @@ def mean_length(list_of_tensors: list[torch.Tensor]) -> torch.Tensor:
 
 
 def find_ascending_sequences(arr_tensor: torch.Tensor, min_length=5) -> list[torch.Tensor]:
+    """
+    find the ascending sequences in a tensor, return a list of ascending sequences.
+    """
     # Find the differences between consecutive elements
     diffs = torch.diff(arr_tensor)
     # Find the indices where the sequence starts
@@ -85,26 +88,28 @@ def compute_gae_and_intrinsic_for_sample_batch(
     Returns:
         SampleBatch: The postprocessed, modified SampleBatch (or a new one).
     """
-
+    print(f"Shape of rewards: {sample_batch[SampleBatch.REWARDS].shape}")
+    print(sample_batch[SampleBatch.OBS][-10:, 20:22])
+    print(sample_batch[SampleBatch.REWARDS][-10:])
     # postprocess of rewards
-    if other_agent_batches is not None:
-        num_agents = len(other_agent_batches) + 1
-    else:
-        num_agents = 1
-
-    agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 4]
-    try:
-        emergency_position = sample_batch[VIRTUAL_OBS][..., 20:22]
-    except KeyError:
-        emergency_position = sample_batch[SampleBatch.OBS][..., 20:22]
-    emergency_states = sample_batch[SampleBatch.OBS][..., 154:190].reshape(-1, 9, 4)
-    intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
-    sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
-    sample_batch['intrinsic_rewards'] = intrinsic
-    if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
-        sample_batch[SampleBatch.REWARDS] += intrinsic
-    else:
-        sample_batch[SampleBatch.REWARDS] += intrinsic.cpu().numpy()
+    # if other_agent_batches is not None:
+    #     num_agents = len(other_agent_batches) + 1
+    # else:
+    #     num_agents = 1
+    #
+    # agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 4]
+    # try:
+    #     emergency_position = sample_batch[VIRTUAL_OBS][..., 20:22]
+    # except KeyError:
+    #     emergency_position = sample_batch[SampleBatch.OBS][..., 20:22]
+    # emergency_states = sample_batch[SampleBatch.OBS][..., 154:190].reshape(-1, 9, 4)
+    # intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
+    # sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
+    # sample_batch['intrinsic_rewards'] = intrinsic
+    # if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
+    #     sample_batch[SampleBatch.REWARDS] += intrinsic
+    # else:
+    #     sample_batch[SampleBatch.REWARDS] += intrinsic.cpu().numpy()
 
     return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
 
@@ -250,3 +255,12 @@ def kl_and_loss_stats_with_regress(policy: Policy,
                 original_dict[f'agent_{i}_target_y'] = model.last_emergency_target[i][1]
         break
     return original_dict
+
+
+def ppo_surrogate_loss_debug(
+        policy: Policy, model: ModelV2,
+        dist_class: Type[TorchDistributionWrapper],
+        train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
+    # print(train_batch['rewards'].shape)
+    # print(train_batch['rewards'][119::120])
+    return ppo_surrogate_loss(policy, model, dist_class, train_batch)
