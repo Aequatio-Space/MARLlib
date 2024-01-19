@@ -76,7 +76,7 @@ def run_ippo(model: Any, exp: Dict, run: Dict, env: Dict,
     num_sgd_iter = _param["num_sgd_iter"]
     vf_loss_coeff = _param["vf_loss_coeff"]
     entropy_coeff = _param["entropy_coeff"]
-    rollout_fragment_length = _param["rollout_fragment_length"]
+    # rollout_fragment_length = _param["rollout_fragment_length"]
     resume = _param["resume"]
     anneal_lr = _param["anneal_lr"]
     back_up_config = merge_dicts(exp, env)
@@ -85,7 +85,7 @@ def run_ippo(model: Any, exp: Dict, run: Dict, env: Dict,
     config = {
         "batch_mode": batch_mode,
         "train_batch_size": train_batch_size,
-        "rollout_fragment_length": rollout_fragment_length,
+        # "rollout_fragment_length": rollout_fragment_length,
         "sgd_minibatch_size": sgd_minibatch_size,
         "entropy_coeff": entropy_coeff,
         "num_sgd_iter": num_sgd_iter,

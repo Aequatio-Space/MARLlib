@@ -158,6 +158,7 @@ class BaseMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self._features = None
         # Holds the last input, in case value branch is separate.
         self._last_obs = None
+
         self.q_flag = False
 
         self.actors = [self.p_encoder, self.p_branch]
