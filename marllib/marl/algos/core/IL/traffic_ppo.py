@@ -8,17 +8,16 @@ from copy import deepcopy
 import numpy as np
 import torch
 from ray.rllib.evaluation import MultiAgentEpisode
-from ray.rllib.evaluation.postprocessing import Postprocessing, compute_advantages
 from ray.rllib.models.modelv2 import ModelV2
 from ray.rllib.models.torch.torch_action_dist import TorchDistributionWrapper
 from ray.rllib.policy.policy import Policy
-from ray.rllib.agents.ppo.ppo_torch_policy import kl_and_loss_stats, vf_preds_fetches, ppo_surrogate_loss
+from ray.rllib.agents.ppo.ppo_torch_policy import (kl_and_loss_stats, vf_preds_fetches,
+                                                   ppo_surrogate_loss, compute_gae_for_sample_batch)
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.torch_ops import apply_grad_clipping, \
     explained_variance, sequence_mask
 from ray.rllib.utils.typing import TensorType, TrainerConfigDict, AgentID
-from ray.util.annotations import DeveloperAPI
 
 torch, nn = try_import_torch()
 
@@ -87,19 +86,6 @@ def compute_gae_and_intrinsic_for_sample_batch(
         SampleBatch: The postprocessed, modified SampleBatch (or a new one).
     """
 
-    # Trajectory is actually complete -> last r=0.0.
-    if sample_batch[SampleBatch.DONES][-1]:
-        last_r = 0.0
-    # Trajectory has been truncated -> last r=VF estimate of last obs.
-    else:
-        # Input dict is provided to us automatically via the Model's
-        # requirements. It's a single-timestep (last one in trajectory)
-        # input_dict.
-        # Create an input dict according to the Model's requirements.
-        input_dict = sample_batch.get_single_step_input_dict(
-            policy.model.view_requirements, index="last")
-        last_r = policy._value(**input_dict)
-
     # postprocess of rewards
     if other_agent_batches is not None:
         num_agents = len(other_agent_batches) + 1
@@ -120,17 +106,7 @@ def compute_gae_and_intrinsic_for_sample_batch(
     else:
         sample_batch[SampleBatch.REWARDS] += intrinsic.cpu().numpy()
 
-    # Adds the policy logits, VF preds, and advantages to the batch,
-    # using GAE ("generalized advantage estimation") or not.
-    batch = compute_advantages(
-        sample_batch,
-        last_r,
-        policy.config["gamma"],
-        policy.config["lambda"],
-        use_gae=policy.config["use_gae"],
-        use_critic=policy.config.get("use_critic", True))
-
-    return batch
+    return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
 
 
 def calculate_intrinsic(agents_position: Union[torch.Tensor, np.ndarray],

@@ -266,11 +266,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
     def train(self):
         logging.debug("train is called")
         self._is_train = True
-        self.last_emergency_mode = self.emergency_mode
-        self.last_emergency_target = self.emergency_target
-        self.emergency_mode = torch.zeros((self.n_agents * self.num_envs), device=self.device)
-        self.emergency_target = torch.full((self.n_agents * self.num_envs, 2), -1,
-                                           dtype=torch.float32, device=self.device)
 
     def eval(self):
         logging.debug("eval is called")
@@ -291,7 +286,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         if not self._is_train:
             timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0]
             logging.debug("NN logged timestep: {}".format(timestep))
-            if timestep == self.episode_length - 1:
+            if timestep == 0:
+                self.last_emergency_mode = self.emergency_mode
+                self.last_emergency_target = self.emergency_target
                 # reset network mode
                 self.emergency_mode = torch.zeros((self.n_agents * self.num_envs), device=self.device)
                 self.emergency_target = torch.full((self.n_agents * self.num_envs, 2), -1,
@@ -323,6 +320,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                         f"is covered by agent {j}")
                                     self.emergency_mode[actual_agent_id] = 0
                                     self.emergency_target[actual_agent_id] = -1
+                            # reassign the original emergency target for agents who didn't complete the task
+                            for j in range(self.n_agents):
+                                actual_agent_id = i * self.n_agents + j
+                                if self.emergency_mode[actual_agent_id] == 1:
+                                    # fill in original target
+                                    all_obs[actual_agent_id][20:22] = self.emergency_target[actual_agent_id]
                             # get environment state and calculate distance with each agent
                             valid_emergencies_xy = emergency_xy[this_coverage == 0]
                             num_of_emergency = len(valid_emergencies_xy)
