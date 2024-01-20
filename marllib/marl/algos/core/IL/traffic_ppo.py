@@ -97,8 +97,8 @@ def compute_gae_and_intrinsic_for_sample_batch(
 
     obs_shape = sample_batch[SampleBatch.OBS].shape
     agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 4]
-    other_agents_relative_position = sample_batch[SampleBatch.OBS] \
-        [..., num_agents + 4: num_agents + 4 + 2 * (num_agents - 1)].reshape(obs_shape[0], -1, 2)
+    # other_agents_relative_position = sample_batch[SampleBatch.OBS] \
+    #     [..., num_agents + 4: num_agents + 4 + 2 * (num_agents - 1)].reshape(obs_shape[0], -1, 2)
     # if isinstance(other_agents_relative_position, np.ndarray):
     #     other_agents_relative_position = torch.from_numpy(other_agents_relative_position)
     # distance_between_agents = torch.norm(other_agents_relative_position, dim=2)
