@@ -88,28 +88,26 @@ def compute_gae_and_intrinsic_for_sample_batch(
     Returns:
         SampleBatch: The postprocessed, modified SampleBatch (or a new one).
     """
-    print(f"Shape of rewards: {sample_batch[SampleBatch.REWARDS].shape}")
-    print(sample_batch[SampleBatch.OBS][-10:, 20:22])
-    print(sample_batch[SampleBatch.REWARDS][-10:])
+
     # postprocess of rewards
-    # if other_agent_batches is not None:
-    #     num_agents = len(other_agent_batches) + 1
-    # else:
-    #     num_agents = 1
-    #
-    # agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 4]
-    # try:
-    #     emergency_position = sample_batch[VIRTUAL_OBS][..., 20:22]
-    # except KeyError:
-    #     emergency_position = sample_batch[SampleBatch.OBS][..., 20:22]
-    # emergency_states = sample_batch[SampleBatch.OBS][..., 154:190].reshape(-1, 9, 4)
-    # intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
-    # sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
-    # sample_batch['intrinsic_rewards'] = intrinsic
-    # if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
-    #     sample_batch[SampleBatch.REWARDS] += intrinsic
-    # else:
-    #     sample_batch[SampleBatch.REWARDS] += intrinsic.cpu().numpy()
+    if other_agent_batches is not None:
+        num_agents = len(other_agent_batches) + 1
+    else:
+        num_agents = 1
+
+    agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 4]
+    try:
+        emergency_position = sample_batch[VIRTUAL_OBS][..., 20:22]
+    except KeyError:
+        emergency_position = sample_batch[SampleBatch.OBS][..., 20:22]
+    emergency_states = sample_batch[SampleBatch.OBS][..., 154:190].reshape(-1, 9, 4)
+    intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
+    sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
+    sample_batch['intrinsic_rewards'] = intrinsic
+    if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
+        sample_batch[SampleBatch.REWARDS] += intrinsic
+    else:
+        sample_batch[SampleBatch.REWARDS] += intrinsic.cpu().numpy()
 
     return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
 
@@ -167,7 +165,7 @@ def add_regress_loss(
             of loss tensors.
     """
     # regression training of predictor
-    if model.selector_type == 'NN':
+    if hasattr(model, "selector_type") and model.selector_type == 'NN':
         virtual_obs = train_batch[VIRTUAL_OBS]
         relabel_targets = find_ascending_sequences(train_batch['intrinsic_rewards'])
         num_agents = 4
