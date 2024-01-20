@@ -258,7 +258,7 @@ def kl_and_loss_stats_with_regress(policy: Policy,
                 original_dict[f'agent_{i}_mode'] = model.last_emergency_mode[i]
                 original_dict[f'agent_{i}_target_x'] = model.last_emergency_target[i][0]
                 original_dict[f'agent_{i}_target_y'] = model.last_emergency_target[i][1]
-                original_dict[f'agent_{i}_count'] = model.last_emergency_count[i]
+                original_dict[f'agent_{i}_count'] = model.last_collision_count[i]
                 original_dict[f'agent_{i}_wait'] = model.last_wait_time[i]
         break
     return original_dict

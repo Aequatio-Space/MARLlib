@@ -211,7 +211,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_feature_num = self.custom_config["emergency_feature_num"]
         self.num_envs = self.custom_config["num_envs"]
         self.reset_states()
-        for item in ['emergency_mode', 'emergency_target', 'wait_time', 'collision_count']:
+        for item in ['last_emergency_mode', 'last_emergency_target',
+                     'last_wait_time', 'last_collision_count']:
             setattr(self, item, None)
         # encoder
         self.p_encoder = BaseEncoder(model_config, self.full_obs_space)
@@ -410,21 +411,21 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                     with torch.no_grad():
                                         batch_predicted_values = self.selector(queries_obs)
                                     # p-persistent
-                                    if random.random() < 0.5:
-                                        # find the min distance
-                                        min_index = torch.argmin(batch_predicted_values)
-                                        # set emergency mode
-                                        self.emergency_mode[i] = 1
-                                        # set emergency target
-                                        self.emergency_target[i] = valid_emergencies_xy[min_index].clone().detach()
-                                        # fill in emergency target
-                                        all_obs[i][20:22] = self.emergency_target[i]
-                                        predicted_values[i] = batch_predicted_values[min_index]
-                                        logging.debug(
-                                            f"agent selected Target:"
-                                            f"({self.emergency_target[i][0].item()},{self.emergency_target[i][1].item()}) "
-                                            f"with metric value {predicted_values[i]}"
-                                        )
+                                    # if random.random() < 0.5:
+                                    # find the min distance
+                                    min_index = torch.argmin(batch_predicted_values)
+                                    # set emergency mode
+                                    self.emergency_mode[i] = 1
+                                    # set emergency target
+                                    self.emergency_target[i] = valid_emergencies_xy[min_index].clone().detach()
+                                    # fill in emergency target
+                                    all_obs[i][20:22] = self.emergency_target[i]
+                                    predicted_values[i] = batch_predicted_values[min_index]
+                                    logging.debug(
+                                        f"agent selected Target:"
+                                        f"({self.emergency_target[i][0].item()},{self.emergency_target[i][1].item()}) "
+                                        f"with metric value {predicted_values[i]}"
+                                    )
                                 else:
                                     predicted_values[i] = -1
                 input_dict['obs']['obs']['agents_state'] = all_obs
