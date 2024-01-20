@@ -95,13 +95,20 @@ def compute_gae_and_intrinsic_for_sample_batch(
     else:
         num_agents = 1
 
+    obs_shape = sample_batch[SampleBatch.OBS].shape
     agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 4]
+    other_agents_relative_position = sample_batch[SampleBatch.OBS] \
+        [..., num_agents + 4: num_agents + 4 + 2 * (num_agents - 1)].reshape(obs_shape[0], -1, 2)
+    # if isinstance(other_agents_relative_position, np.ndarray):
+    #     other_agents_relative_position = torch.from_numpy(other_agents_relative_position)
+    # distance_between_agents = torch.norm(other_agents_relative_position, dim=2)
     try:
         emergency_position = sample_batch[VIRTUAL_OBS][..., 20:22]
     except KeyError:
         emergency_position = sample_batch[SampleBatch.OBS][..., 20:22]
     emergency_states = sample_batch[SampleBatch.OBS][..., 154:190].reshape(-1, 9, 4)
     intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
+    # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
     sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
     sample_batch['intrinsic_rewards'] = intrinsic
     if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
@@ -251,6 +258,8 @@ def kl_and_loss_stats_with_regress(policy: Policy,
                 original_dict[f'agent_{i}_mode'] = model.last_emergency_mode[i]
                 original_dict[f'agent_{i}_target_x'] = model.last_emergency_target[i][0]
                 original_dict[f'agent_{i}_target_y'] = model.last_emergency_target[i][1]
+                original_dict[f'agent_{i}_count'] = model.last_emergency_count[i]
+                original_dict[f'agent_{i}_wait'] = model.last_wait_time[i]
         break
     return original_dict
 
