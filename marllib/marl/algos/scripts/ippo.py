@@ -79,6 +79,7 @@ def run_ippo(model: Any, exp: Dict, run: Dict, env: Dict,
     rollout_fragment_length = _param["rollout_fragment_length"]
     resume = _param["resume"]
     anneal_lr = _param["anneal_lr"]
+    gamma = _param['gamma']
     back_up_config = merge_dicts(exp, env)
     back_up_config.pop("algo_args")  # clean for grid_search
 
@@ -94,6 +95,7 @@ def run_ippo(model: Any, exp: Dict, run: Dict, env: Dict,
         "lambda": gae_lambda,
         "vf_loss_coeff": vf_loss_coeff,
         "kl_coeff": kl_coeff,
+        "gamma": gamma,
         "vf_clip_param": vf_clip_param,
         "model": {
             "custom_model": "Base_Model",
