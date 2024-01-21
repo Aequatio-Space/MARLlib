@@ -20,44 +20,23 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from .vda2c import run_vda2c
-from .vdppo import run_vdppo
-from .vdn_qmix_iql import run_joint_q
-from .maa2c import run_maa2c
-from .mappo import run_mappo
-from .coma import run_coma
-from .ia2c import run_ia2c
-from .ippo import run_ippo
-from .iddpg import run_iddpg
-from .maddpg import run_maddpg
-from .facmac import run_facmac
-from .happo import run_happo
-from .itrpo import run_itrpo
-from .hatrpo import run_hatrpo
-from .matrpo import run_matrpo
-from .trafficppo import run_traffic_ppo
+# PPO parameters
 
+# Detailed explanation for each hyper parameter can be found in ray/rllib/agents/ppo/ippo.py
 
-POlICY_REGISTRY = {
-    "ia2c": run_ia2c,
-    "ippo": run_ippo,
-    "trafficppo": run_traffic_ppo,
-    "iql": run_joint_q,
-    "qmix": run_joint_q,
-    "vdn": run_joint_q,
-    "vda2c": run_vda2c,
-    "vdppo": run_vdppo,
-    "maa2c": run_maa2c,
-    "mappo": run_mappo,
-    "coma": run_coma,
-    "iddpg": run_iddpg,
-    "maddpg": run_maddpg,
-    "facmac": run_facmac,
-    'happo': run_happo,
-    'itrpo': run_itrpo,
-    'hatrpo': run_hatrpo,
-    'matrpo': run_matrpo
-}
-
-
+algo_args:
+  use_gae: True
+  lambda: 1.0
+  kl_coeff: 0.2
+  batch_episode: 10
+  rollout_fragment_length: 120
+  num_sgd_iter: 5
+  vf_loss_coeff: 1.0
+  lr: 0.0005
+  entropy_coeff: 0.01
+  clip_param: 0.3
+  gamma: 0.99
+  vf_clip_param: 10.0
+  batch_mode: "truncate_episodes"
+  anneal_lr: False
 

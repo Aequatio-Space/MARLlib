@@ -27,7 +27,7 @@ from typing import Dict
 
 
 algo_type_dict = {
-    "IL": ["ia2c", "iddpg", "itrpo", "ippo"],
+    "IL": ["ia2c", "iddpg", "itrpo", "ippo", 'trafficppo'],
     "VD": ["vda2c", "vdppo", "facmac", "iql", "vdn", "qmix"],
     "CC": ["maa2c", "maddpg", "mappo", "matrpo", "happo", "hatrpo", "coma"]
 }
