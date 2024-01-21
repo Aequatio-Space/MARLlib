@@ -89,6 +89,7 @@ class BaseEncoder(nn.Module, MixInputEncoderMixin):
             cnn_layers, dim2 = self.construct_cnn_layers(obs_space['obs'][Constants.IMAGE_STATE])
             self.encoder['cnn'] = nn.Sequential(*cnn_layers)
             self.output_dim = dim1 + dim2
+            self.dims = [dim1, dim2]
         else:
             if "fc_layer" in self.custom_config["model_arch_args"]:
                 layers, input_dim = self.construct_fc_layer(obs_space['obs'])
@@ -98,6 +99,7 @@ class BaseEncoder(nn.Module, MixInputEncoderMixin):
                 raise ValueError("fc_layer/conv layer not in model arch args")
             self.encoder = nn.Sequential(*layers)
             self.output_dim = input_dim  # record
+            self.dims = [input_dim]
         logging.debug(f"Encoder Configuration: {self.encoder}")
 
     def construct_cnn_layers(self, obs_space):

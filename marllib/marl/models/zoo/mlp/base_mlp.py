@@ -33,6 +33,7 @@ from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.typing import Dict, TensorType, List
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
+from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
 from warp_drive.utils.constants import Constants
 
 torch, nn = try_import_torch()
@@ -202,27 +203,31 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
         self.activation = model_config.get("fcnet_activation")
-        self.selector_type = (self.custom_config['model_arch_args']['selector_type'] or
+        self.model_arch_args = self.custom_config['model_arch_args']
+        self.selector_type = (self.model_arch_args['selector_type'] or
                               self.custom_config["selector_type"])
-        self.render = self.custom_config['model_arch_args']['render']
+        self.render = self.model_arch_args['render']
         if self.render:
-            self.render_file_name = self.custom_config['model_arch_args']['render_file_name']
+            self.render_file_name = self.model_arch_args['render_file_name']
         else:
             self.render_file_name = ""
 
         # self.count = 0
         self._is_train = False
-
-        self.emergency_dim = self.custom_config["emergency_dim"]
-        self.emergency_feature_num = self.custom_config["emergency_feature_num"]
+        self.with_task_allocation = self.custom_config["with_task_allocation"]
+        self.separate_encoder = self.custom_config["separate_encoder"]
         self.num_envs = self.custom_config["num_envs"]
         self.reset_states()
         for item in ['last_emergency_mode', 'last_emergency_target',
                      'last_wait_time', 'last_collision_count']:
             setattr(self, item, None)
         # encoder
-        self.p_encoder = BaseEncoder(model_config, self.full_obs_space)
-        self.vf_encoder = BaseEncoder(model_config, self.full_obs_space)
+        if self.separate_encoder:
+            self.vf_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space)
+            self.p_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space)
+        else:
+            self.p_encoder = BaseEncoder(model_config, self.full_obs_space)
+            self.vf_encoder = BaseEncoder(model_config, self.full_obs_space)
 
         self.p_branch = SlimFC(
             in_size=self.p_encoder.output_dim,
@@ -298,178 +303,179 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 state: List[TensorType],
                 seq_lens: TensorType) -> (TensorType, List[TensorType]):
         observation = input_dict['obs']['obs']
-        inf_mask = None
         if isinstance(observation, dict):
             flat_inputs = {k: v.float() for k, v in observation.items()}
         else:
             flat_inputs = observation.float()
-        if not self._is_train:
-            timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0].to(torch.int32)
-            logging.debug("NN logged timestep: {}".format(timestep))
-            if timestep == 0:
-                for item in ['emergency_mode', 'emergency_target', 'wait_time', 'collision_count']:
-                    setattr(self, 'last_' + item, getattr(self, item))
-                # reset network mode
-                self.reset_states()
-            else:
-                emergency_status = input_dict['obs']['state'][Constants.VECTOR_STATE][...,
-                                   self.n_agents * (self.n_agents + 4):-1].reshape(-1, 9, 4)
-                emergency_xy = \
-                    torch.stack([emergency_status[..., 0], emergency_status[..., 1]], axis=-1).to(self.device)[0]
-                target_coverage = emergency_status[..., 3].to(self.device)
-                all_obs = flat_inputs[Constants.VECTOR_STATE]
-                predicted_values = torch.zeros((len(all_obs),), device=self.device)
-                logging.debug("predicted_values shape: {}".format(predicted_values.shape))
-                logging.debug(f"Mode before obs: {self.emergency_mode.cpu().numpy()}")
-                if torch.sum(all_obs) > 0:
-                    if self.selector_type == 'oracle':
-                        # split all_obs into [num_envs] of vectors
-                        all_env_obs = all_obs.reshape(-1, self.n_agents, 22)
-                        for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs,
-                                                                         target_coverage[::self.n_agents])):
-                            covered_emergency = emergency_xy[this_coverage == 1]
-                            for j in range(self.n_agents):
-                                actual_agent_id = i * self.n_agents + j
-                                if self.emergency_target[actual_agent_id] in covered_emergency:
-                                    # reset emergency mode
-                                    logging.debug(
-                                        f"Emergency target ({self.emergency_target[actual_agent_id][0].item()},"
-                                        f"{self.emergency_target[actual_agent_id][1].item()}) in env {i} "
-                                        f"is covered by agent {j}")
-                                    self.emergency_mode[actual_agent_id] = 0
-                                    self.emergency_target[actual_agent_id] = -1
-                            # reassign the original emergency target for agents who didn't complete the task
-                            for j in range(self.n_agents):
-                                actual_agent_id = i * self.n_agents + j
-                                if self.emergency_mode[actual_agent_id] == 1:
-                                    # fill in original target
-                                    all_obs[actual_agent_id][20:22] = self.emergency_target[actual_agent_id]
-                            # get environment state and calculate distance with each agent
-                            valid_emergencies_xy = emergency_xy[this_coverage == 0]
-                            num_of_emergency = len(valid_emergencies_xy)
-                            agents_xy = env_obs[..., self.n_agents + 2: self.n_agents + 4].repeat(
-                                num_of_emergency, 1).reshape(num_of_emergency, self.n_agents, 2).to(self.device)
-                            matrix_emergency = valid_emergencies_xy.repeat(
-                                1, self.n_agents).reshape(num_of_emergency, self.n_agents, 2)
-                            distances = torch.norm(agents_xy - matrix_emergency, dim=2)
-                            # for each valid emergency, find the closest agent
-                            for j in range(num_of_emergency):
-                                is_allocated = False
-                                for agent_emergency in self.emergency_target[
-                                                       i * self.n_agents: (i + 1) * self.n_agents]:
-                                    if torch.all(agent_emergency == valid_emergencies_xy[j]):
-                                        # this emergency is already allocated
-                                        is_allocated = True
-                                        break
-                                if not is_allocated:
-                                    query_index = torch.argsort(distances[j])
-                                    for agent_id in query_index:
-                                        agent_actual_index = i * self.n_agents + agent_id
-                                        if self.emergency_mode[agent_actual_index] == 0:
-                                            # assign emergency to this agent
-                                            self.emergency_mode[agent_actual_index] = 1
-                                            self.emergency_target[agent_actual_index] = valid_emergencies_xy[j]
-                                            logging.debug(f"Allocated Emergency for agent {agent_id} in env {i}: "
-                                                          f"{valid_emergencies_xy[j]}")
-                                            # fill in emergency target
-                                            all_obs[agent_actual_index, 20:22] = (
-                                                valid_emergencies_xy[j].to(all_obs.device))
+        if self.with_task_allocation:
+            if not self._is_train:
+                timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0].to(torch.int32)
+                logging.debug("NN logged timestep: {}".format(timestep))
+                if timestep == 0:
+                    for item in ['emergency_mode', 'emergency_target', 'wait_time', 'collision_count']:
+                        setattr(self, 'last_' + item, getattr(self, item))
+                    # reset network mode
+                    self.reset_states()
+                else:
+                    emergency_status = input_dict['obs']['state'][Constants.VECTOR_STATE][...,
+                                       self.n_agents * (self.n_agents + 4):-1].reshape(-1, 9, 4)
+                    emergency_xy = \
+                        torch.stack([emergency_status[..., 0], emergency_status[..., 1]], axis=-1).to(self.device)[0]
+                    target_coverage = emergency_status[..., 3].to(self.device)
+                    all_obs = flat_inputs[Constants.VECTOR_STATE]
+                    predicted_values = torch.zeros((len(all_obs),), device=self.device)
+                    logging.debug("predicted_values shape: {}".format(predicted_values.shape))
+                    logging.debug(f"Mode before obs: {self.emergency_mode.cpu().numpy()}")
+                    if torch.sum(all_obs) > 0:
+                        if self.selector_type == 'oracle':
+                            # split all_obs into [num_envs] of vectors
+                            all_env_obs = all_obs.reshape(-1, self.n_agents, 22)
+                            for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs,
+                                                                             target_coverage[::self.n_agents])):
+                                covered_emergency = emergency_xy[this_coverage == 1]
+                                for j in range(self.n_agents):
+                                    actual_agent_id = i * self.n_agents + j
+                                    if self.emergency_target[actual_agent_id] in covered_emergency:
+                                        # reset emergency mode
+                                        logging.debug(
+                                            f"Emergency target ({self.emergency_target[actual_agent_id][0].item()},"
+                                            f"{self.emergency_target[actual_agent_id][1].item()}) in env {i} "
+                                            f"is covered by agent {j}")
+                                        self.emergency_mode[actual_agent_id] = 0
+                                        self.emergency_target[actual_agent_id] = -1
+                                # reassign the original emergency target for agents who didn't complete the task
+                                for j in range(self.n_agents):
+                                    actual_agent_id = i * self.n_agents + j
+                                    if self.emergency_mode[actual_agent_id] == 1:
+                                        # fill in original target
+                                        all_obs[actual_agent_id][20:22] = self.emergency_target[actual_agent_id]
+                                # get environment state and calculate distance with each agent
+                                valid_emergencies_xy = emergency_xy[this_coverage == 0]
+                                num_of_emergency = len(valid_emergencies_xy)
+                                agents_xy = env_obs[..., self.n_agents + 2: self.n_agents + 4].repeat(
+                                    num_of_emergency, 1).reshape(num_of_emergency, self.n_agents, 2).to(self.device)
+                                matrix_emergency = valid_emergencies_xy.repeat(
+                                    1, self.n_agents).reshape(num_of_emergency, self.n_agents, 2)
+                                distances = torch.norm(agents_xy - matrix_emergency, dim=2)
+                                # for each valid emergency, find the closest agent
+                                for j in range(num_of_emergency):
+                                    is_allocated = False
+                                    for agent_emergency in self.emergency_target[
+                                                           i * self.n_agents: (i + 1) * self.n_agents]:
+                                        if torch.all(agent_emergency == valid_emergencies_xy[j]):
+                                            # this emergency is already allocated
+                                            is_allocated = True
                                             break
-                    else:
-                        for i, this_coverage in enumerate(target_coverage):
-                            # logging.debug(f"index: {i}")
-                            if self.emergency_mode[i]:
-                                # check emergency coverage
-                                index = torch.nonzero(torch.all(emergency_xy == self.emergency_target[i], dim=1)).to(
-                                    self.device)
-                                if len(index) > 0 and this_coverage[index]:
-                                    # target is covered, reset emergency mode
-                                    logging.debug(f"Emergency target ({self.emergency_target[i][0].item()},"
-                                                  f"{self.emergency_target[i][1].item()}) is covered by agent")
-                                    self.emergency_mode[i] = 0
-                                    self.emergency_target[i] = -1
-                                    self.collision_count[i] = 0
-                                    self.wait_time[i] = 0
-                                else:
-                                    # detect whether the target emergency is also approached by other agents
-                                    other_agent_rel_pos = all_obs[i][self.n_agents + 4: self.n_agents + 4 + (
-                                                self.n_agents - 1) * 2].reshape(-1, 2)
-                                    # calculate the distance between myself and other agents
-                                    distances = torch.norm(other_agent_rel_pos, dim=1)
-                                    # if any distances are too small, abort emergency mode
-                                    if torch.any(distances < 0.1):
-                                        # self.count += 1
+                                    if not is_allocated:
+                                        query_index = torch.argsort(distances[j])
+                                        for agent_id in query_index:
+                                            agent_actual_index = i * self.n_agents + agent_id
+                                            if self.emergency_mode[agent_actual_index] == 0:
+                                                # assign emergency to this agent
+                                                self.emergency_mode[agent_actual_index] = 1
+                                                self.emergency_target[agent_actual_index] = valid_emergencies_xy[j]
+                                                logging.debug(f"Allocated Emergency for agent {agent_id} in env {i}: "
+                                                              f"{valid_emergencies_xy[j]}")
+                                                # fill in emergency target
+                                                all_obs[agent_actual_index, 20:22] = (
+                                                    valid_emergencies_xy[j].to(all_obs.device))
+                                                break
+                        else:
+                            for i, this_coverage in enumerate(target_coverage):
+                                # logging.debug(f"index: {i}")
+                                if self.emergency_mode[i]:
+                                    # check emergency coverage
+                                    index = torch.nonzero(
+                                        torch.all(emergency_xy == self.emergency_target[i], dim=1)).to(
+                                        self.device)
+                                    if len(index) > 0 and this_coverage[index]:
+                                        # target is covered, reset emergency mode
                                         logging.debug(f"Emergency target ({self.emergency_target[i][0].item()},"
-                                                      f"{self.emergency_target[i][1].item()}) collision is detected.")
+                                                      f"{self.emergency_target[i][1].item()}) is covered by agent")
                                         self.emergency_mode[i] = 0
                                         self.emergency_target[i] = -1
-                                        self.collision_count[i] += 1
-                                        self.wait_time[i] = 2 ** self.collision_count[i]
+                                        self.collision_count[i] = 0
+                                        self.wait_time[i] = 0
                                     else:
-                                        # fill in original target
-                                        all_obs[i][20:22] = self.emergency_target[i]
-                                predicted_values[i] = -1
-                            else:
-                                if self.wait_time[i] > 0:
-                                    self.wait_time[i] -= 1
-                                    continue
-                                valid_emergencies = this_coverage == 0
-                                valid_emergencies_xy = emergency_xy[valid_emergencies]
-                                num_of_emergency = len(valid_emergencies_xy)
-                                if num_of_emergency > 0:
-                                    # query predictor for new emergency target
-                                    queries_obs = all_obs[i].repeat(len(valid_emergencies_xy), 1)
-                                    queries_obs[..., 20:22] = valid_emergencies_xy.clone().detach()
-                                    with torch.no_grad():
-                                        batch_predicted_values = self.selector(queries_obs)
-                                    # p-persistent
-                                    # if random.random() < 0.5:
-                                    # find the min distance
-                                    min_index = torch.argmin(batch_predicted_values)
-                                    # set emergency mode
-                                    self.emergency_mode[i] = 1
-                                    # set emergency target
-                                    self.emergency_target[i] = valid_emergencies_xy[min_index].clone().detach()
-                                    # fill in emergency target
-                                    all_obs[i][20:22] = self.emergency_target[i]
-                                    predicted_values[i] = batch_predicted_values[min_index]
-                                    logging.debug(
-                                        f"agent selected Target:"
-                                        f"({self.emergency_target[i][0].item()},{self.emergency_target[i][1].item()}) "
-                                        f"with metric value {predicted_values[i]}"
-                                    )
-                                else:
+                                        # detect whether the target emergency is also approached by other agents
+                                        other_agent_rel_pos = all_obs[i][self.n_agents + 4: self.n_agents + 4 + (
+                                                self.n_agents - 1) * 2].reshape(-1, 2)
+                                        # calculate the distance between myself and other agents
+                                        distances = torch.norm(other_agent_rel_pos, dim=1)
+                                        # if any distances are too small, abort emergency mode
+                                        if torch.any(distances < 0.1):
+                                            # self.count += 1
+                                            logging.debug(f"Emergency target ({self.emergency_target[i][0].item()},"
+                                                          f"{self.emergency_target[i][1].item()}) collision is detected.")
+                                            self.emergency_mode[i] = 0
+                                            self.emergency_target[i] = -1
+                                            self.collision_count[i] += 1
+                                            self.wait_time[i] = 2 ** self.collision_count[i]
+                                        else:
+                                            # fill in original target
+                                            all_obs[i][20:22] = self.emergency_target[i]
                                     predicted_values[i] = -1
-                input_dict['obs']['obs']['agents_state'] = all_obs
-            logging.debug(f"Mode after obs: {self.emergency_mode.cpu().numpy()}")
-            if self.render:
-                self.wait_time_list[timestep] = self.wait_time[:self.n_agents].cpu()
-                self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents].cpu()
-                self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents].cpu()
-                self.wait_time_list[timestep] = self.wait_time[:self.n_agents].cpu()
-                self.collision_count_list[timestep] = self.collision_count[:self.n_agents].cpu()
-            if timestep == self.episode_length - 1:
+                                else:
+                                    if self.wait_time[i] > 0:
+                                        self.wait_time[i] -= 1
+                                        continue
+                                    valid_emergencies = this_coverage == 0
+                                    valid_emergencies_xy = emergency_xy[valid_emergencies]
+                                    num_of_emergency = len(valid_emergencies_xy)
+                                    if num_of_emergency > 0:
+                                        # query predictor for new emergency target
+                                        queries_obs = all_obs[i].repeat(len(valid_emergencies_xy), 1)
+                                        queries_obs[..., 20:22] = valid_emergencies_xy.clone().detach()
+                                        with torch.no_grad():
+                                            batch_predicted_values = self.selector(queries_obs)
+                                        # p-persistent
+                                        # if random.random() < 0.5:
+                                        # find the min distance
+                                        min_index = torch.argmin(batch_predicted_values)
+                                        # set emergency mode
+                                        self.emergency_mode[i] = 1
+                                        # set emergency target
+                                        self.emergency_target[i] = valid_emergencies_xy[min_index].clone().detach()
+                                        # fill in emergency target
+                                        all_obs[i][20:22] = self.emergency_target[i]
+                                        predicted_values[i] = batch_predicted_values[min_index]
+                                        logging.debug(
+                                            f"agent selected Target:"
+                                            f"({self.emergency_target[i][0].item()},{self.emergency_target[i][1].item()}) "
+                                            f"with metric value {predicted_values[i]}"
+                                        )
+                                    else:
+                                        predicted_values[i] = -1
+                    input_dict['obs']['obs']['agents_state'] = all_obs
+                logging.debug(f"Mode after obs: {self.emergency_mode.cpu().numpy()}")
                 if self.render:
-                    # output all rendering information as csv
-                    import pandas as pd
-                    # concatenate all rendering information
-                    all_rendering_info = torch.cat(
-                        [self.wait_time_list, self.emergency_mode_list,
-                         self.emergency_target_list.reshape(self.episode_length, -1),
-                         self.collision_count_list], dim=-1)
-                    # convert to numpy
-                    all_rendering_info = all_rendering_info.cpu().numpy()
-                    # convert to pandas dataframe
-                    all_rendering_info = pd.DataFrame(all_rendering_info)
-                    # save to csv
-                    datatime_str = datetime.now().strftime("%Y%m%d-%H%M%S")
-                    all_rendering_info.to_csv(f"{self.render_file_name}_{datatime_str}.csv")
-            self.last_virtual_obs = input_dict['obs']['obs']['agents_state']
-        else:
-            try:
-                input_dict['obs']['obs']['agents_state'] = input_dict['virtual_obs']
-            except KeyError:
-                print("No virtual obs found")
+                    self.wait_time_list[timestep] = self.wait_time[:self.n_agents].cpu()
+                    self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents].cpu()
+                    self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents].cpu()
+                    self.wait_time_list[timestep] = self.wait_time[:self.n_agents].cpu()
+                    self.collision_count_list[timestep] = self.collision_count[:self.n_agents].cpu()
+                if timestep == self.episode_length - 1:
+                    if self.render:
+                        # output all rendering information as csv
+                        import pandas as pd
+                        # concatenate all rendering information
+                        all_rendering_info = torch.cat(
+                            [self.wait_time_list, self.emergency_mode_list,
+                             self.emergency_target_list.reshape(self.episode_length, -1),
+                             self.collision_count_list], dim=-1)
+                        # convert to numpy
+                        all_rendering_info = all_rendering_info.cpu().numpy()
+                        # convert to pandas dataframe
+                        all_rendering_info = pd.DataFrame(all_rendering_info)
+                        # save to csv
+                        datatime_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+                        all_rendering_info.to_csv(f"{self.render_file_name}_{datatime_str}.csv")
+                self.last_virtual_obs = input_dict['obs']['obs']['agents_state']
+            else:
+                try:
+                    input_dict['obs']['obs']['agents_state'] = input_dict['virtual_obs']
+                except KeyError:
+                    print("No virtual obs found")
         return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
 
     @override(TorchModelV2)

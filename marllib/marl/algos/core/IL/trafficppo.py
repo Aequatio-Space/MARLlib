@@ -60,6 +60,17 @@ def find_ascending_sequences(arr_tensor: torch.Tensor, min_length=5) -> list[tor
     return fragments
 
 
+def relabel_for_sample_batch(
+        policy: Policy,
+        sample_batch: SampleBatch,
+        other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
+        episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
+    """
+    relabel expected goal for agents
+    """
+    sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
+    return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
+
 def compute_gae_and_intrinsic_for_sample_batch(
         policy: Policy,
         sample_batch: SampleBatch,

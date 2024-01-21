@@ -328,10 +328,14 @@ def build_model(
         raise NotImplementedError("{} not supported agent model arch".format(model_preference["core_arch"]))
 
     if isinstance(environment[0].observation_space.spaces['obs'], spaces.Dict):
-        # if isinstance(environment[0], RLlibCUDACrowdSim) and model_preference['core_arch'] in ['crowdsim_net']:
-        #     encoder = "crowdsim_encoder"
-        # else:
-        encoder = "mix_encoder"
+        try:
+            is_separate = model_config['separate_encoder']
+        except KeyError:
+            is_separate = False
+        if is_separate:
+            encoder = "crowdsim_encoder"
+        else:
+            encoder = "mix_encoder"
     else:
         if len(environment[0].observation_space.spaces["obs"].shape) == 1:
             encoder = "fc_encoder"
