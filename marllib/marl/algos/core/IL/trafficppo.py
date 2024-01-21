@@ -7,6 +7,8 @@ from typing import Dict, List, Type, Union, Optional
 from copy import deepcopy
 import numpy as np
 import torch
+from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
+from ray.rllib.agents.ppo import PPOTorchPolicy, DEFAULT_CONFIG as PPO_CONFIG
 from ray.rllib.evaluation import MultiAgentEpisode
 from ray.rllib.models.modelv2 import ModelV2
 from ray.rllib.models.torch.torch_action_dist import TorchDistributionWrapper
@@ -15,8 +17,6 @@ from ray.rllib.agents.ppo.ppo_torch_policy import (kl_and_loss_stats, vf_preds_f
                                                    ppo_surrogate_loss, compute_gae_for_sample_batch)
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.torch_ops import apply_grad_clipping, \
-    explained_variance, sequence_mask
 from ray.rllib.utils.typing import TensorType, TrainerConfigDict, AgentID
 
 torch, nn = try_import_torch()
@@ -271,3 +271,25 @@ def ppo_surrogate_loss_debug(
     # print(train_batch['rewards'].shape)
     # print(train_batch['rewards'][119::120])
     return ppo_surrogate_loss(policy, model, dist_class, train_batch)
+
+
+TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
+    name="TrafficPPOTorchPolicy",
+    get_default_config=lambda: PPO_CONFIG,
+    postprocess_fn=compute_gae_and_intrinsic_for_sample_batch,
+    loss_fn=add_regress_loss,
+    extra_action_out_fn=extra_action_out_fn,
+    stats_fn=kl_and_loss_stats_with_regress,
+)
+
+
+def get_policy_class_traffic_ppo(config_):
+    if config_["framework"] == "torch":
+        return TrafficPPOTorchPolicy
+
+
+TrafficPPOTrainer = WandbPPOTrainer.with_updates(
+    name="TRAFFICPPOTrainer",
+    default_policy=None,
+    get_policy_class=get_policy_class_traffic_ppo,
+)

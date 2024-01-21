@@ -26,7 +26,7 @@ from ray.tune import CLIReporter
 from ray.rllib.models import ModelCatalog
 from marllib.marl.algos.utils.log_dir_util import available_local_dir
 from marllib.marl.algos.utils.setup_utils import AlgVar
-from marllib.marl.algos.core.IL.ppo import TrafficPPOTrainer
+from marllib.marl.algos.core.IL.trafficppo import TrafficPPOTrainer
 from marllib.marl.algos.scripts.coma import restore_model
 import json
 from typing import Any, Dict

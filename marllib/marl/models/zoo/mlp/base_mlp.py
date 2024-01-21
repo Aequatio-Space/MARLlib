@@ -1,4 +1,5 @@
 # MIT License
+import datetime
 import logging
 import random
 
@@ -201,8 +202,13 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
         self.activation = model_config.get("fcnet_activation")
-        self.selector_type = self.custom_config['model_arch_args']['selector_type'] or self.custom_config[
-            "selector_type"]
+        self.selector_type = (self.custom_config['model_arch_args']['selector_type'] or
+                              self.custom_config["selector_type"])
+        self.render = self.custom_config['model_arch_args']['render']
+        if self.render:
+            self.render_file_name = self.custom_config['model_arch_args']['render_file_name']
+        else:
+            self.render_file_name = ""
 
         # self.count = 0
         self._is_train = False
@@ -261,6 +267,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     activation_fn=self.activation)
             )
         # Note, the final activation cannot be tanh, check.
+        if self.render:
+            self.wait_time_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
+            self.emergency_mode_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
+            self.emergency_target_list = torch.zeros([self.episode_length, self.n_agents, 2], device=self.device)
+            self.wait_time_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
+            self.collision_count_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
         if wandb.run is not None:
             wandb.watch(models=tuple(self.actors), log='all')
 
@@ -292,7 +304,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         else:
             flat_inputs = observation.float()
         if not self._is_train:
-            timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0]
+            timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0].to(torch.int32)
             logging.debug("NN logged timestep: {}".format(timestep))
             if timestep == 0:
                 for item in ['emergency_mode', 'emergency_target', 'wait_time', 'collision_count']:
@@ -430,14 +442,29 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                     predicted_values[i] = -1
                 input_dict['obs']['obs']['agents_state'] = all_obs
             logging.debug(f"Mode after obs: {self.emergency_mode.cpu().numpy()}")
-            # print('Collision count: {}'.format(self.count))
+            if self.render:
+                self.wait_time_list[timestep] = self.wait_time[:self.n_agents].cpu()
+                self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents].cpu()
+                self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents].cpu()
+                self.wait_time_list[timestep] = self.wait_time[:self.n_agents].cpu()
+                self.collision_count_list[timestep] = self.collision_count[:self.n_agents].cpu()
+            if timestep == self.episode_length - 1:
+                if self.render:
+                    # output all rendering information as csv
+                    import pandas as pd
+                    # concatenate all rendering information
+                    all_rendering_info = torch.cat(
+                        [self.wait_time_list, self.emergency_mode_list,
+                         self.emergency_target_list.reshape(self.episode_length, -1),
+                         self.collision_count_list], dim=-1)
+                    # convert to numpy
+                    all_rendering_info = all_rendering_info.cpu().numpy()
+                    # convert to pandas dataframe
+                    all_rendering_info = pd.DataFrame(all_rendering_info)
+                    # save to csv
+                    datatime_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    all_rendering_info.to_csv(f"{self.render_file_name}_{datatime_str}.csv")
             self.last_virtual_obs = input_dict['obs']['obs']['agents_state']
-            # if wandb.run is not None and len(predicted_values) >= self.n_agents:
-            #     # log agent allocation status
-            #     for i in range(self.n_agents):
-            #         wandb.log({"agent_{}_emergency_mode".format(i): self.emergency_mode[i].item()})
-            #         wandb.log({"agent_{}_emergency_target".format(i): predicted_values[i].item()})
-            # self.last_predicted_values = predicted_values
         else:
             try:
                 input_dict['obs']['obs']['agents_state'] = input_dict['virtual_obs']
@@ -460,7 +487,10 @@ class CrowdSimAttention(TorchModelV2, nn.Module, BaseMLPMixin):
             name,
             **kwargs,
     ):
-        super().__init__(obs_space, action_space, num_outputs, model_config, name, **kwargs)
+        TorchModelV2.__init__(self, obs_space, action_space, num_outputs,
+                              model_config, name)
+        nn.Module.__init__(self)
+        BaseMLPMixin.__init__(self)
         self.embedding_dim = 32
         self.keys_fc = SlimFC(
             in_size=self.p_encoder.output_dim,
@@ -509,3 +539,13 @@ class CrowdSimAttention(TorchModelV2, nn.Module, BaseMLPMixin):
             logits = logits + inf_mask
 
         return logits, predicted_reward, state
+
+
+def log_emergency_target_draft():
+    pass
+    # if wandb.run is not None and len(predicted_values) >= self.n_agents:
+    #     # log agent allocation status
+    #     for i in range(self.n_agents):
+    #         wandb.log({"agent_{}_emergency_mode".format(i): self.emergency_mode[i].item()})
+    #         wandb.log({"agent_{}_emergency_target".format(i): predicted_values[i].item()})
+    # self.last_predicted_values = predicted_values

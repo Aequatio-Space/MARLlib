@@ -31,6 +31,7 @@ import json
 from typing import Any, Dict
 from ray.tune.analysis import ExperimentAnalysis
 
+restore_ignore_params = ['render', 'render_file_name']
 
 def restore_model(restore: Dict, exp: Dict):
     if restore is not None:
@@ -40,6 +41,11 @@ def restore_model(restore: Dict, exp: Dict):
             checkpoint_arch = parsed_checkpoints[0]['_last_result']['config']['model']["custom_model_config"][
                 'model_arch_args']
             check_exp = exp['model_arch_args']
+            for item in restore_ignore_params:
+                try:
+                    del check_exp[item]
+                except KeyError:
+                    pass
             if check_exp != checkpoint_arch:
                 raise ValueError("is not using the params required by the checkpoint model")
         model_path = restore["model_path"]

@@ -23,9 +23,6 @@
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from ray.rllib.agents.ppo.ppo_torch_policy import PPOTorchPolicy
 from ray.rllib.agents.ppo.ppo import DEFAULT_CONFIG as PPO_CONFIG
-from marllib.marl.algos.core.IL.traffic_ppo import (
-    compute_gae_and_intrinsic_for_sample_batch, add_regress_loss,
-    extra_action_out_fn, kl_and_loss_stats_with_regress)
 
 ###########
 ### PPO ###
@@ -37,23 +34,10 @@ IPPOTorchPolicy = PPOTorchPolicy.with_updates(
     get_default_config=lambda: PPO_CONFIG,
 )
 
-TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
-    name="TrafficPPOTorchPolicy",
-    get_default_config=lambda: PPO_CONFIG,
-    postprocess_fn=compute_gae_and_intrinsic_for_sample_batch,
-    loss_fn=add_regress_loss,
-    extra_action_out_fn=extra_action_out_fn,
-    stats_fn=kl_and_loss_stats_with_regress,
-)
 
 def get_policy_class_ppo(config_):
     if config_["framework"] == "torch":
         return IPPOTorchPolicy
-
-
-def get_policy_class_traffic_ppo(config_):
-    if config_["framework"] == "torch":
-        return TrafficPPOTorchPolicy
 
 
 IPPOTrainer = WandbPPOTrainer.with_updates(
@@ -62,8 +46,3 @@ IPPOTrainer = WandbPPOTrainer.with_updates(
     get_policy_class=get_policy_class_ppo,
 )
 
-TrafficPPOTrainer = WandbPPOTrainer.with_updates(
-    name="TrafficPPOTrainer",
-    default_policy=None,
-    get_policy_class=get_policy_class_traffic_ppo,
-)
