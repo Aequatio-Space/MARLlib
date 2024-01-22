@@ -25,4 +25,3 @@ from .cc_mlp import CentralizedCriticMLP
 from .ddpg_mlp import DDPGSeriesMLP
 from .jointQ_mlp import JointQMLP
 from .vd_mlp import ValueDecompMLP
-from .crowdsim_net import CrowdSimNet

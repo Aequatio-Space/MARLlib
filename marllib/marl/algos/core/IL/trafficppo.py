@@ -20,6 +20,14 @@ from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.typing import TensorType, TrainerConfigDict, AgentID
 
+status_dim = 20
+
+emergency_features = 2
+
+emergency_count = 9
+
+emergency_dim = emergency_features * emergency_count
+
 torch, nn = try_import_torch()
 
 logger = logging.getLogger(__name__)
@@ -73,9 +81,8 @@ def relabel_for_sample_batch(
     """
     relabel expected goal for agents
     """
-    # sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
     k = 1
-    goal_number = 3
+    goal_number = 8
     extra_batches = [sample_batch.copy() for _ in range(k)]
     # postprocess extra_batches
     for i in range(len(extra_batches)):
@@ -86,18 +93,23 @@ def relabel_for_sample_batch(
         else:
             num_agents = 1
         obs_shape = original_batch[SampleBatch.OBS].shape
-        agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 4]
-        # sample an ascending sequence of with length k
+        agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 2 + 2]
+        # sample an ascending sequence of with length goal_number
         sequence = generate_ascending_sequence_vectorized(goal_number, obs_shape[0])
         original_obs = original_batch[SampleBatch.OBS]
         j = 0
         fill_index = 0
+        # values from 0 to 16 ((emergnecy_count - 1) * feature_num) with step 2
+        # bin from 0 to episode_length with the same length of values
+        bins = np.linspace(0, obs_shape[0], emergency_count)
         while fill_index < len(sequence) and j < obs_shape[0]:
-            emergency_location = int(j / episode_length * 9) * 2
+            emergency_location = int((np.digitize(np.array([j]), bins) - 1) * emergency_features)
+            logging.debug(f"emergency_location: {emergency_location}")
             goal_to_fill = agents_position[sequence[fill_index]]
             while j < obs_shape[0]:
-                original_obs[j][20:38] = 0
-                original_obs[j][20 + emergency_location: 20 + emergency_location + 2] = goal_to_fill
+                original_obs[j][status_dim:status_dim + emergency_dim] = 0
+                original_obs[j][
+                status_dim + emergency_location: status_dim + emergency_location + emergency_features] = goal_to_fill
                 if np.linalg.norm(goal_to_fill - agents_position[j]) < 0.05:
                     original_batch[SampleBatch.REWARDS][j] += 10
                     break

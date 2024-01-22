@@ -22,10 +22,10 @@
 
 status_dim: 20
 grid_dim: (1, 10, 10)
-emergency_feature_num: 2
+emergency_feature_dim: 2
 emergency_dim: 18
 hidden_state_size: 32
 num_envs: 500
 with_task_allocation: False
-separate_encoder: True
+separate_encoder: False
 selector_type: 'NN'
