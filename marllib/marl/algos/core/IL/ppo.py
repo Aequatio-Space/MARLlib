@@ -32,7 +32,7 @@ from marllib.marl.algos.core.IL.trafficppo import relabel_for_sample_batch
 IPPOTorchPolicy = PPOTorchPolicy.with_updates(
     name="IPPOTorchPolicy",
     get_default_config=lambda: PPO_CONFIG,
-    postprocess_fn=relabel_for_sample_batch,
+    # postprocess_fn=relabel_for_sample_batch,
 )
 
 

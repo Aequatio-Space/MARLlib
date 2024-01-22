@@ -13,6 +13,7 @@ from ray.rllib.evaluation import MultiAgentEpisode
 from ray.rllib.models.modelv2 import ModelV2
 from ray.rllib.models.torch.torch_action_dist import TorchDistributionWrapper
 from ray.rllib.policy.policy import Policy
+from ray.rllib.policy.torch_policy import TorchPolicy
 from ray.rllib.agents.ppo.ppo_torch_policy import (kl_and_loss_stats, vf_preds_fetches,
                                                    ppo_surrogate_loss, compute_gae_for_sample_batch)
 from ray.rllib.policy.sample_batch import SampleBatch
@@ -60,16 +61,58 @@ def find_ascending_sequences(arr_tensor: torch.Tensor, min_length=5) -> list[tor
     return fragments
 
 
+def generate_ascending_sequence_vectorized(count, limit):
+    increments = np.cumsum(np.random.randint(1, int(limit / count), (count,), dtype=np.int32))
+    return increments
+
 def relabel_for_sample_batch(
-        policy: Policy,
+        policy: TorchPolicy,
         sample_batch: SampleBatch,
         other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
         episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
     """
     relabel expected goal for agents
     """
-    sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
-    return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
+    # sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
+    k = 1
+    goal_number = 3
+    extra_batches = [sample_batch.copy() for _ in range(k)]
+    # postprocess extra_batches
+    for i in range(len(extra_batches)):
+        original_batch = extra_batches[i]
+        # postprocess of rewards
+        if other_agent_batches is not None:
+            num_agents = len(other_agent_batches) + 1
+        else:
+            num_agents = 1
+        obs_shape = original_batch[SampleBatch.OBS].shape
+        agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 4]
+        # sample an ascending sequence of with length k
+        sequence = generate_ascending_sequence_vectorized(goal_number, obs_shape[0])
+        original_obs = original_batch[SampleBatch.OBS]
+        j = 0
+        fill_index = 0
+        while fill_index < len(sequence) and j < obs_shape[0]:
+            emergency_location = int(j / episode_length * 9) * 2
+            goal_to_fill = agents_position[sequence[fill_index]]
+            while j < obs_shape[0]:
+                original_obs[j][20:38] = 0
+                original_obs[j][20 + emergency_location: 20 + emergency_location + 2] = goal_to_fill
+                if np.linalg.norm(goal_to_fill - agents_position[j]) < 0.05:
+                    original_batch[SampleBatch.REWARDS][j] += 10
+                    break
+                j += 1
+            fill_index += 1
+        extra_batches[i] = original_batch
+    postprocess_batches = [compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)]
+    for batch in extra_batches:
+        # must copy a batch since the input dict will be equipped with torch interceptor.
+        _ = policy.compute_actions_from_input_dict(batch.copy())
+        batch.update(policy.extra_action_out(batch, [], policy.model, None))
+        new_batch = compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
+        postprocess_batches.append(new_batch)
+    return SampleBatch.concat_samples(postprocess_batches)
+
 
 def compute_gae_and_intrinsic_for_sample_batch(
         policy: Policy,
