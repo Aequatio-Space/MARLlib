@@ -20,6 +20,8 @@ from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.typing import TensorType, TrainerConfigDict, AgentID
 
+EMERGENCY_REWARD_INCREMENT = 10
+
 status_dim = 20
 
 emergency_features = 2
@@ -70,8 +72,16 @@ def find_ascending_sequences(arr_tensor: torch.Tensor, min_length=5) -> list[tor
 
 
 def generate_ascending_sequence_vectorized(count, limit):
-    increments = np.cumsum(np.random.randint(1, int(limit / count), (count,), dtype=np.int32))
-    return increments
+    # increments = np.cumsum(np.random.randint(1, int(limit / count), (count,), dtype=np.int32))
+    # return increments
+    import math
+    segment_length = math.ceil(limit / count)
+    base = np.arange(0, limit, segment_length)
+    offsets = np.random.randint(0, segment_length, (count,), dtype=np.int32)
+    sequence = base + offsets
+    return np.where(sequence < limit, sequence, limit - 1)
+
+
 
 def relabel_for_sample_batch(
         policy: TorchPolicy,
@@ -82,16 +92,102 @@ def relabel_for_sample_batch(
     relabel expected goal for agents
     """
     k = 1
-    goal_number = 8
+    goal_number = 3
+    use_intrinsic = True
     extra_batches = [sample_batch.copy() for _ in range(k)]
+    # postprocess of rewards
+    if other_agent_batches is not None:
+        num_agents = len(other_agent_batches) + 1
+    else:
+        num_agents = 1
     # postprocess extra_batches
+    agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 4]
+    emergency_states = sample_batch[SampleBatch.OBS][..., 154:190].reshape(-1, 9, 4)
+    future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch)
+    # fix_interval_relabeling(extra_batches, 20, num_agents, sample_batch)
+    postprocess_batches = [compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)]
+    for batch in extra_batches:
+        # must copy a batch since the input dict will be equipped with torch interceptor.
+        _ = policy.compute_actions_from_input_dict(batch.copy())
+        batch.update(policy.extra_action_out(batch, [], policy.model, None))
+        if use_intrinsic:
+            # Extract non-zero elements
+            emergency_matrix = batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+            emergency_position = np.zeros_like(agents_position)
+            for i in range(len(emergency_position)):
+                indices = np.nonzero(emergency_matrix[i])[0]
+                if len(indices) != 0:
+                    emergency_position[i] = emergency_matrix[i][indices]
+            # Reshape the array into the desired format
+            if emergency_matrix.shape[0] != 0:
+                intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
+                batch[SampleBatch.REWARDS] += intrinsic.cpu().numpy()
+        # new_batch = compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
+        new_batch = label_done_masks_and_calculate_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
+        postprocess_batches.append(new_batch)
+    return SampleBatch.concat_samples(postprocess_batches)
+    # try, send relabeled trajectory only.
+    # return postprocess_batches[-1]
+
+
+def label_done_masks_and_calculate_gae_for_sample_batch(
+        policy: TorchPolicy,
+        sample_batch: SampleBatch,
+        other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
+        episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
+    separate_batches = []
+    last_index = 0
+    for index, reward in enumerate(sample_batch[SampleBatch.REWARDS]):
+        if reward >= EMERGENCY_REWARD_INCREMENT:
+            sample_batch[SampleBatch.DONES][index] = True
+            separate_batches.append(sample_batch[last_index:index + 1].copy())
+            last_index = index + 1
+    if len(separate_batches) == 0:
+        return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
+    if last_index < len(sample_batch[SampleBatch.REWARDS]):
+        separate_batches.append(sample_batch[last_index:].copy())
+    separate_batches = [compute_gae_for_sample_batch(policy, small_batch, other_agent_batches, episode)
+                        for small_batch in separate_batches]
+    return SampleBatch.concat_samples(separate_batches)
+
+
+def fix_interval_relabeling(extra_batches, goal_number, num_agents, sample_batch):
     for i in range(len(extra_batches)):
         original_batch = extra_batches[i]
-        # postprocess of rewards
-        if other_agent_batches is not None:
-            num_agents = len(other_agent_batches) + 1
-        else:
-            num_agents = 1
+        original_obs = original_batch[SampleBatch.OBS]
+        obs_shape = original_batch[SampleBatch.OBS].shape
+        bins = np.linspace(0, obs_shape[0], emergency_count)
+        agents_position = sample_batch[SampleBatch.OBS][goal_number::goal_number, num_agents + 2: num_agents + 2 + 2]
+        # the agent_position in the same step length should be the same
+        for j in range(obs_shape[0] - goal_number):
+            emergency_location = int((np.digitize(np.array([j]), bins) - 1) * emergency_features)
+            original_obs[j][status_dim:status_dim + emergency_dim] = 0
+            my_fix_goal = agents_position[j // goal_number]
+            original_obs[j][status_dim + emergency_location:
+                            status_dim + emergency_location + emergency_features] = my_fix_goal
+        original_batch[SampleBatch.REWARDS][np.arange(goal_number - 1, obs_shape[0],
+                                                      goal_number, dtype=np.int32)] += 10
+        extra_batches[i] = original_batch
+
+
+def mapping_relabeling(extra_batches, start_timestep, num_agents, sample_batch):
+    for i in range(len(extra_batches)):
+        original_batch = extra_batches[i]
+        obs_shape = original_batch[SampleBatch.OBS].shape
+        agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 2 + 2]
+        goals_to_be_filled = agents_position[start_timestep:, :]
+        # sample an ascending sequence of with length goal_number
+        original_obs = original_batch[SampleBatch.OBS]
+        original_obs[:len(original_obs) - start_timestep, status_dim:status_dim + emergency_dim] = 0
+        original_obs[:len(original_obs) - start_timestep,
+        status_dim:status_dim + emergency_features] = goals_to_be_filled
+        extra_batches[i] = original_batch
+
+
+def future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch):
+    # try relabeling at the first column only?
+    for i in range(len(extra_batches)):
+        original_batch = extra_batches[i]
         obs_shape = original_batch[SampleBatch.OBS].shape
         agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 2 + 2]
         # sample an ascending sequence of with length goal_number
@@ -108,22 +204,15 @@ def relabel_for_sample_batch(
             goal_to_fill = agents_position[sequence[fill_index]]
             while j < obs_shape[0]:
                 original_obs[j][status_dim:status_dim + emergency_dim] = 0
-                original_obs[j][
-                status_dim + emergency_location: status_dim + emergency_location + emergency_features] = goal_to_fill
+                original_obs[j][status_dim + emergency_location:
+                                status_dim + emergency_location + emergency_features] = goal_to_fill
                 if np.linalg.norm(goal_to_fill - agents_position[j]) < 0.05:
                     original_batch[SampleBatch.REWARDS][j] += 10
+                    j += 1
                     break
                 j += 1
             fill_index += 1
         extra_batches[i] = original_batch
-    postprocess_batches = [compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)]
-    for batch in extra_batches:
-        # must copy a batch since the input dict will be equipped with torch interceptor.
-        _ = policy.compute_actions_from_input_dict(batch.copy())
-        batch.update(policy.extra_action_out(batch, [], policy.model, None))
-        new_batch = compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
-        postprocess_batches.append(new_batch)
-    return SampleBatch.concat_samples(postprocess_batches)
 
 
 def compute_gae_and_intrinsic_for_sample_batch(

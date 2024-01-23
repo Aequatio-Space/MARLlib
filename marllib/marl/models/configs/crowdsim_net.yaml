@@ -26,6 +26,6 @@ emergency_feature_dim: 2
 emergency_dim: 18
 hidden_state_size: 32
 num_envs: 500
-with_task_allocation: False
+with_task_allocation: True
 separate_encoder: False
 selector_type: 'NN'

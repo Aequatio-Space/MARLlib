@@ -23,7 +23,8 @@
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from ray.rllib.agents.ppo.ppo_torch_policy import PPOTorchPolicy
 from ray.rllib.agents.ppo.ppo import DEFAULT_CONFIG as PPO_CONFIG
-from marllib.marl.algos.core.IL.trafficppo import relabel_for_sample_batch
+from marllib.marl.algos.core.IL.trafficppo import (relabel_for_sample_batch,
+                                                   label_done_masks_and_calculate_gae_for_sample_batch)
 ###########
 ### PPO ###
 ###########
@@ -32,7 +33,7 @@ from marllib.marl.algos.core.IL.trafficppo import relabel_for_sample_batch
 IPPOTorchPolicy = PPOTorchPolicy.with_updates(
     name="IPPOTorchPolicy",
     get_default_config=lambda: PPO_CONFIG,
-    # postprocess_fn=relabel_for_sample_batch,
+    postprocess_fn=relabel_for_sample_batch,
 )
 
 

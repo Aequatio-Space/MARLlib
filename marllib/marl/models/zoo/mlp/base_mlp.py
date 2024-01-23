@@ -39,6 +39,24 @@ from warp_drive.utils.constants import Constants
 torch, nn = try_import_torch()
 
 
+def argmax_to_mask(argmax_indices, num_classes=4, num_coords=2):
+    # Create a mask tensor filled with zeros
+    mask = torch.zeros((len(argmax_indices), num_coords * (num_classes - 1)), dtype=torch.float32)
+
+    # Set the values in the mask based on argmax indices
+    for i, index in enumerate(argmax_indices):
+        if index == 0:
+            # Class 0 masks all entries
+            continue
+        else:
+            # Calculate the start index for the corresponding class in the mask
+            start_index = (index - 1) * num_coords
+            # Set the values in the mask for the corresponding class
+            mask[i, start_index:start_index + num_coords] = 1.0
+
+    # Reshape the mask to have dimensions (len(argmax_indices), num_coords, num_classes)
+    return mask
+
 class RandomSelector(nn.Module):
     def __init__(self, num_agents, num_actions):
         super().__init__()
@@ -219,6 +237,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.with_task_allocation = self.custom_config["with_task_allocation"]
         self.separate_encoder = self.custom_config["separate_encoder"]
         self.num_envs = self.custom_config["num_envs"]
+        self.status_dim = self.custom_config["status_dim"]
+        self.emergency_dim = self.custom_config["emergency_dim"]
+        self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
+        self.emergency_label_number = self.emergency_dim // self.emergency_feature_dim + 1
+        self.emergency_mode = self.emergency_target = self.wait_time = self.collision_count = None
+        self.last_emergency_selection = None
         self.reset_states()
         for item in ['last_emergency_mode', 'last_emergency_target',
                      'last_wait_time', 'last_collision_count']:
@@ -269,9 +293,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     activation_fn=self.activation),
                 SlimFC(
                     in_size=64,
-                    out_size=1,
+                    out_size=self.emergency_label_number,
                     initializer=normc_initializer(0.01),
-                    activation_fn=self.activation)
+                    activation_fn=self.activation),
+                nn.Softmax(dim=0)
             )
         # Note, the final activation cannot be tanh, check.
         if self.render:
@@ -284,6 +309,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             wandb.watch(models=tuple(self.actors), log='all')
 
     def reset_states(self):
+        self.last_emergency_selection = torch.zeros(self.n_agents, device=self.device)
         self.emergency_mode = torch.zeros((self.n_agents * self.num_envs), device=self.device)
         self.emergency_target = torch.full((self.n_agents * self.num_envs, 2), -1,
                                            dtype=torch.float32, device=self.device)
@@ -310,11 +336,16 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         else:
             flat_inputs = observation.float()
         if self.with_task_allocation:
-            self.query_and_assign(flat_inputs, input_dict)
+            self.one_time_assign(flat_inputs, input_dict)
         return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
 
     def one_time_assign(self, flat_inputs, input_dict):
-        pass
+        agent_observations = flat_inputs[Constants.VECTOR_STATE]
+        selection_result = torch.argmax(self.selector(agent_observations), dim=1)
+        obs_masks = argmax_to_mask(selection_result, num_classes=self.emergency_label_number, num_coords=2)
+        agent_observations[..., self.status_dim:] *= obs_masks
+        input_dict['obs']['obs']['agents_state'] = agent_observations
+        self.last_emergency_selection = selection_result[:self.n_agents]
 
     def query_and_assign(self, flat_inputs, input_dict):
         if not self._is_train:
