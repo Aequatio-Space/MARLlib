@@ -95,7 +95,7 @@ def relabel_for_sample_batch(
     """
     relabel expected goal for agents
     """
-    k = 1
+    k = 0
     goal_number = 3
     use_intrinsic = True
 
@@ -116,6 +116,9 @@ def relabel_for_sample_batch(
     extra_batches = [sample_batch.copy() for _ in range(k)]
     future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch)
     # fix_interval_relabeling(extra_batches, 20, num_agents, sample_batch)
+    emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+    if use_intrinsic:
+        modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, sample_batch)
     postprocess_batches = [label_done_masks_and_calculate_gae_for_sample_batch(policy, sample_batch,
                                                                                other_agent_batches, episode)]
     for batch in extra_batches:
@@ -162,7 +165,7 @@ def label_done_masks_and_calculate_gae_for_sample_batch(
         raw_rewards = sample_batch[SampleBatch.REWARDS]
     for index, reward in enumerate(raw_rewards):
         if reward >= EMERGENCY_REWARD_INCREMENT:
-            sample_batch[SampleBatch.DONES][index] = True
+            # sample_batch[SampleBatch.DONES][index] = True
             separate_batches.append(sample_batch[last_index:index + 1].copy())
             emergencies_masks.append(no_emergency_mask[last_index:index + 1])
             last_index = index + 1
@@ -182,8 +185,10 @@ def label_done_masks_and_calculate_gae_for_sample_batch(
         else:
             batch['labels'] = np.full(batch_length,
                                       -1)  # discard last batch by default since it contains truncated result.
-        labeled_batches.append(compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode))
-    return SampleBatch.concat_samples(labeled_batches)
+        labeled_batches.append(batch)
+        # labeled_batches.append(compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode))
+    full_batch = SampleBatch.concat_samples(labeled_batches)
+    return compute_gae_for_sample_batch(policy, full_batch, other_agent_batches, episode)
 
 
 def fix_interval_relabeling(extra_batches, goal_number, num_agents, sample_batch):
@@ -377,25 +382,28 @@ def add_regress_loss(
         # filter out labels with -1
         mask = torch.logical_and(labels != -1, labels != 1)
         logging.debug(f"label count: {torch.sum(mask)}")
-        dataset = torch.utils.data.TensorDataset(inputs[mask].to(torch.float32), labels[mask].to(torch.float32))
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        mean_loss = torch.tensor(0.0).to(model.device)
-        if torch.sum(inputs) != 0:
-            progress = tqdm(range(epochs))
-            model.selector.train()
-            for _ in progress:
-                for batch_observations, batch_distances in dataloader:
-                    optimizer.zero_grad()
-                    if batch_observations.shape[0] != batch_size:
-                        continue
-                    outputs = model.selector(batch_observations.cuda())
-                    loss = criterion(outputs.squeeze(), batch_distances.cuda())
-                    loss.backward()
-                    mean_loss += loss.detach()
-                    optimizer.step()
-                progress.set_postfix({'loss': loss.item()})
-            mean_loss /= epochs * len(dataloader)
-            model.selector.eval()
+        if torch.sum(mask) == 0:
+            mean_loss = torch.tensor(0.0)
+        else:
+            dataset = torch.utils.data.TensorDataset(inputs[mask].to(torch.float32), labels[mask].to(torch.float32))
+            dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+            mean_loss = torch.tensor(0.0).to(model.device)
+            if torch.sum(inputs) != 0:
+                progress = tqdm(range(epochs))
+                model.selector.train()
+                for _ in progress:
+                    for batch_observations, batch_distances in dataloader:
+                        optimizer.zero_grad()
+                        if batch_observations.shape[0] != batch_size:
+                            continue
+                        outputs = model.selector(batch_observations.cuda())
+                        loss = criterion(outputs.squeeze(), batch_distances.cuda())
+                        loss.backward()
+                        mean_loss += loss.detach()
+                        optimizer.step()
+                    progress.set_postfix({'loss': loss.item()})
+                mean_loss /= epochs * len(dataloader)
+                model.selector.eval()
     else:
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
@@ -480,10 +488,10 @@ def increasing_intrinsic_relabeling(model, train_batch, virtual_obs):
             train_batch['intrinsic_rewards'][fragment] = calculate_intrinsic(
                 agent_position, emergency_position, torch.zeros(1, device=model.device),
                 fake=True, device=model.device).to(torch.float32).to(train_batch_device)
-            train_batch['rewards'][fragment] = (train_batch['original_rewards'][fragment] +
+            train_batch[SampleBatch.REWARDS][fragment] = (train_batch['original_rewards'][fragment] +
                                                 train_batch['intrinsic_rewards'][fragment])
             # additional complete bonus
-            train_batch['rewards'][fragment[-1]] += len(fragment) * 5 / episode_length
+            train_batch[SampleBatch.REWARDS][fragment[-1]] += len(fragment) * 5 / episode_length
             train_batch[VIRTUAL_OBS][fragment] = obs_to_be_relabeled
         # for successful trajectories, the aoi is not 100% correct (smaller than actual), check if needed.
         predictor_inputs.append(obs_to_be_relabeled[0])
@@ -537,8 +545,8 @@ def ppo_surrogate_loss_debug(
         policy: Policy, model: ModelV2,
         dist_class: Type[TorchDistributionWrapper],
         train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
-    # print(train_batch['rewards'].shape)
-    # print(train_batch['rewards'][119::120])
+    # print(train_batch[SampleBatch.REWARDS].shape)
+    # print(train_batch[SampleBatch.REWARDS][119::120])
     return ppo_surrogate_loss(policy, model, dist_class, train_batch)
 
 

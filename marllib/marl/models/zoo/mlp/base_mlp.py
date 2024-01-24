@@ -513,7 +513,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             try:
                 input_dict['obs']['obs']['agents_state'] = input_dict['virtual_obs']
             except KeyError:
-                print("No virtual obs found")
+                logging.debug("No virtual obs found")
 
     @override(TorchModelV2)
     def value_function(self) -> TensorType:
