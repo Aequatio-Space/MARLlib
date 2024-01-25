@@ -1,6 +1,12 @@
 """
 PyTorch policy class used for PPO.
 """
+import datetime
+import os
+import pickle
+import random
+import re
+
 import gym
 import logging
 from typing import Dict, List, Type, Union, Optional
@@ -86,7 +92,6 @@ def generate_ascending_sequence_vectorized(count, limit):
     return np.where(sequence < limit, sequence, limit - 1)
 
 
-
 def relabel_for_sample_batch(
         policy: TorchPolicy,
         sample_batch: SampleBatch,
@@ -100,19 +105,21 @@ def relabel_for_sample_batch(
     use_intrinsic = True
 
     # postprocess of rewards
-    if other_agent_batches is not None:
-        num_agents = len(other_agent_batches) + 1
-    else:
-        num_agents = 1
+    num_agents = policy.model.n_agents
     # postprocess extra_batches
     try:
         virtual_obs = sample_batch[VIRTUAL_OBS]
         sample_batch[SampleBatch.OBS][..., :status_dim + emergency_dim] = virtual_obs
     except KeyError:
         pass
+    observation_dim = policy.model.status_dim + policy.model.emergency_feature_dim + 100
+    state_agents_dim = (num_agents + 4) * num_agents
+    this_emergency_count = policy.model.emergency_count
     observation = sample_batch[SampleBatch.OBS]
     agents_position = observation[..., num_agents + 2: num_agents + 4]
-    emergency_states = observation[..., 154:190].reshape(-1, 9, 4)
+    emergency_states = (observation[..., observation_dim + state_agents_dim:
+                                         state_agents_dim + observation_dim + this_emergency_count * 4])
+    emergency_states = emergency_states.reshape(-1, this_emergency_count, 4)
     extra_batches = [sample_batch.copy() for _ in range(k)]
     future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch)
     # fix_interval_relabeling(extra_batches, 20, num_agents, sample_batch)
@@ -309,7 +316,7 @@ def compute_gae_and_intrinsic_for_sample_batch(
         emergency_position = sample_batch[VIRTUAL_OBS][..., status_dim:status_dim + emergency_dim]
     except KeyError:
         emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
-    emergency_states = sample_batch[SampleBatch.OBS][..., 154:190].reshape(-1, 9, 4)
+    emergency_states = sample_batch[SampleBatch.OBS][..., 154:190].reshape(-1, policy.model.emergency_count, 4)
     modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, sample_batch)
     return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
 
@@ -396,12 +403,12 @@ def add_regress_loss(
                         optimizer.zero_grad()
                         if batch_observations.shape[0] != batch_size:
                             continue
-                        outputs = model.selector(batch_observations.cuda())
-                        loss = criterion(outputs.squeeze(), batch_distances.cuda())
+                        outputs = model.selector(batch_observations.to(model.device))
+                        loss = criterion(outputs.squeeze(), batch_distances.to(model.device))
                         loss.backward()
                         mean_loss += loss.detach()
                         optimizer.step()
-                    progress.set_postfix({'loss': loss.item()})
+                    progress.set_postfix({'mean_loss': mean_loss.item()})
                 mean_loss /= epochs * len(dataloader)
                 model.selector.eval()
     else:
@@ -489,7 +496,7 @@ def increasing_intrinsic_relabeling(model, train_batch, virtual_obs):
                 agent_position, emergency_position, torch.zeros(1, device=model.device),
                 fake=True, device=model.device).to(torch.float32).to(train_batch_device)
             train_batch[SampleBatch.REWARDS][fragment] = (train_batch['original_rewards'][fragment] +
-                                                train_batch['intrinsic_rewards'][fragment])
+                                                          train_batch['intrinsic_rewards'][fragment])
             # additional complete bonus
             train_batch[SampleBatch.REWARDS][fragment[-1]] += len(fragment) * 5 / episode_length
             train_batch[VIRTUAL_OBS][fragment] = obs_to_be_relabeled
@@ -548,6 +555,42 @@ def ppo_surrogate_loss_debug(
     # print(train_batch[SampleBatch.REWARDS].shape)
     # print(train_batch[SampleBatch.REWARDS][119::120])
     return ppo_surrogate_loss(policy, model, dist_class, train_batch)
+
+
+def save_sample_batch(
+        policy: TorchPolicy,
+        sample_batch: SampleBatch,
+        other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
+        episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
+    datatime_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    all_agent_batches = {'drones_' + str(sample_batch['agent_index'][0]): sample_batch}
+    if other_agent_batches is not None:
+        for agent_id, (this_policy, batch) in other_agent_batches.items():
+            all_agent_batches[agent_id] = batch
+    for agent_id, batch in all_agent_batches.items():
+        filename = f"output_{datatime_str}_agent_{agent_id}.pkl"
+        with open(os.path.join("/workspace", "saved_data", filename), "wb") as pickle_file:
+            logging.debug(f"saving trajectory file {filename}.")
+            pickle.dump(batch, pickle_file)
+    return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
+
+
+def sample_batch_with_demonstration(
+        policy: TorchPolicy,
+        sample_batch: SampleBatch,
+        other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
+        episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
+    # keep only numbers in sample_batch['agent_index']
+    agent_id = re.sub(r"[^0-9]", "", str(int(sample_batch['agent_index'][0])))
+    with open(os.path.join("/workspace", "saved_data", f"output_20240124-195236_agent_drones_{agent_id}.pkl"),
+              "rb") as pickle_file:
+        demonstration: SampleBatch = pickle.load(pickle_file)
+        if random.random() < 0.5:
+            logging.debug("using demonstration for agent_id: " + agent_id)
+            return compute_gae_for_sample_batch(policy, demonstration, other_agent_batches, episode)
+        else:
+            logging.debug("using normal batch for agent_id: " + agent_id)
+            return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
 
 
 TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(

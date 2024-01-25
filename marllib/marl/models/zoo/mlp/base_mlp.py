@@ -2,7 +2,7 @@
 import datetime
 import logging
 import random
-
+from numba import njit
 import numpy as np
 # Copyright (c) 2023 Replicable-MARL
 
@@ -83,6 +83,7 @@ class Predictor(nn.Module):
     def forward(self, x):
         x = x.view(x.size(0), -1)  # 展平输入
         return self.fc(x)
+
 
 class RandomSelector(nn.Module):
     def __init__(self, num_agents, num_actions):
@@ -244,15 +245,20 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         BaseMLPMixin.__init__(self)
 
         # decide the model arch
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.inputs = None
         self.custom_config = model_config["custom_model_config"]
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
         self.activation = model_config.get("fcnet_activation")
         self.model_arch_args = self.custom_config['model_arch_args']
+        if self.model_arch_args['local_mode']:
+            self.device = torch.device("cpu")
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.selector_type = (self.model_arch_args['selector_type'] or
                               self.custom_config["selector_type"])
+        self.episode_length = 120
         self.render = self.model_arch_args['render']
         if self.render:
             self.render_file_name = self.model_arch_args['render_file_name']
@@ -265,35 +271,40 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.separate_encoder = self.custom_config["separate_encoder"]
         self.num_envs = self.custom_config["num_envs"]
         self.status_dim = self.custom_config["status_dim"]
-        self.emergency_dim = self.custom_config["emergency_dim"]
+        self.gen_interval = self.model_arch_args['gen_interval']
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
-        self.emergency_label_number = self.emergency_dim // self.emergency_feature_dim + 1
-        self.emergency_mode = self.emergency_target = self.wait_time = self.collision_count = None
+        self.emergency_count = int(((self.episode_length / self.gen_interval) - 1) * (self.n_agents - 1))
+        # self.emergency_label_number = self.emergency_dim // self.emergency_feature_dim + 1
+        self.emergency_mode = self.emergency_target = None
+        self.emergency_indices = None
+
         self.last_emergency_selection = None
         self.reset_states()
-        for item in ['last_emergency_mode', 'last_emergency_target',
-                     'last_wait_time', 'last_collision_count']:
+        for item in ['last_emergency_mode', 'last_emergency_target']:
             setattr(self, item, None)
         # encoder
         if self.separate_encoder:
-            self.vf_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space)
-            self.p_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space)
+            self.vf_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
+                self.device)
+            self.p_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
+                self.device)
         else:
-            self.p_encoder = BaseEncoder(model_config, self.full_obs_space)
-            self.vf_encoder = BaseEncoder(model_config, self.full_obs_space)
+            self.p_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
+            self.vf_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
 
         self.p_branch = SlimFC(
             in_size=self.p_encoder.output_dim,
             out_size=num_outputs,
             initializer=normc_initializer(0.01),
-            activation_fn=None)
+            activation_fn=None).to(self.device)
 
         # self.vf_encoder = nn.Sequential(*copy.deepcopy(layers))
         self.vf_branch = SlimFC(
             in_size=self.vf_encoder.output_dim,
             out_size=1,
             initializer=normc_initializer(0.01),
-            activation_fn=None)
+            activation_fn=None).to(self.device)
+
         logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
         logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
         # Holds the current "base" output (before logits layer).
@@ -305,32 +316,36 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.last_predicted_values = None
         self.actors = [self.p_encoder, self.p_branch]
         self.critics = [self.vf_encoder, self.vf_branch]
-        self.episode_length = 120
+
         self.actor_initialized_parameters = self.actor_parameters()
         if self.selector_type == "greedy":
             self.selector = GreedySelector(self.n_agents, num_outputs)
         elif self.selector_type == 'random':
             self.selector = RandomSelector(self.n_agents, num_outputs)
         elif self.selector_type == 'NN':
-            self.selector = Predictor(self.full_obs_space['obs']['agents_state'].shape[0])
-            self.selector.to(self.device)
+            self.selector = Predictor(self.full_obs_space['obs']['agents_state'].shape[0]).to(self.device)
         # Note, the final activation cannot be tanh, check.
         if self.render:
-            self.wait_time_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
-            self.emergency_mode_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
-            self.emergency_target_list = torch.zeros([self.episode_length, self.n_agents, 2], device=self.device)
-            self.wait_time_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
+            # self.wait_time_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
+            self.emergency_mode_list = np.zeros([self.episode_length, self.n_agents], dtype=np.bool_)
+            self.emergency_target_list = np.zeros([self.episode_length, self.n_agents, 2], device=self.device)
+            # self.wait_time_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
             self.collision_count_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
         if wandb.run is not None:
             wandb.watch(models=tuple(self.actors), log='all')
 
+
     def reset_states(self):
         self.last_emergency_selection = torch.zeros(self.n_agents, device=self.device)
-        self.emergency_mode = torch.zeros((self.n_agents * self.num_envs), device=self.device)
-        self.emergency_target = torch.full((self.n_agents * self.num_envs, 2), -1,
-                                           dtype=torch.float32, device=self.device)
-        self.wait_time = torch.zeros((self.n_agents * self.num_envs), device=self.device, dtype=torch.int32)
-        self.collision_count = torch.zeros((self.n_agents * self.num_envs), device=self.device, dtype=torch.int32)
+        self.emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
+        self.emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
+        self.emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
+        # same mode, indices, target with "mock" for testing
+        # self.mock_emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
+        # self.mock_emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
+        # self.mock_emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
+        # self.wait_time = torch.zeros((self.n_agents * self.num_envs), device=self.device, dtype=torch.int32)
+        # self.collision_count = torch.zeros((self.n_agents * self.num_envs), device=self.device, dtype=torch.int32)
 
     def train(self):
         logging.debug("train is called")
@@ -339,8 +354,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
     def eval(self):
         logging.debug("eval is called")
         self._is_train = False
-
-
 
     @override(TorchModelV2)
     def forward(self, input_dict: Dict[str, TensorType],
@@ -363,30 +376,77 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         input_dict['obs']['obs']['agents_state'] = agent_observations
         self.last_emergency_selection = selection_result[:self.n_agents]
 
+    def old_task_assign_query(self, target_coverage, emergency_xy, all_obs):
+        for i, this_coverage in enumerate(target_coverage):
+            # logging.debug(f"index: {i}")
+            if self.mock_emergency_mode[i]:
+                # check emergency coverage
+                if this_coverage[self.mock_emergency_indices[i]]:
+                    # target is covered, reset emergency mode
+                    logging.debug(f"Emergency target ({self.mock_emergency_target[i][0]},"
+                                  f"{self.mock_emergency_target[i][1]}) is covered by agent")
+                    self.mock_emergency_mode[i] = 0
+                    self.mock_emergency_target[i] = -1
+                    self.mock_emergency_indices[i] = -1
+                    # self.mock_collision_count[i] = 0
+                    # self.mock_wait_time[i] = 0
+                else:
+                    # fill in original target
+                    all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = torch.from_numpy(
+                        self.emergency_target[i]).to(all_obs.device)
+                # predicted_values[i] = -1
+            else:
+                valid_emergencies = this_coverage == 0
+                actual_indices = np.nonzero(valid_emergencies)[0]
+                valid_emergencies_xy = emergency_xy[valid_emergencies]
+                num_of_emergency = len(valid_emergencies_xy)
+                if num_of_emergency > 0:
+                    # query predictor for new emergency target
+                    queries_obs = all_obs[i].repeat(len(valid_emergencies_xy), 1).to(self.device)
+                    queries_obs[...,
+                    self.status_dim:self.status_dim + self.emergency_feature_dim] = torch.from_numpy(
+                        valid_emergencies_xy)
+                    with torch.no_grad():
+                        batch_predicted_values = self.selector(queries_obs)
+                    # find the min distance
+                    min_index = torch.argmin(batch_predicted_values)
+                    # set emergency mode
+                    self.mock_emergency_mode[i] = 1
+                    # set emergency target
+                    self.mock_emergency_target[i] = valid_emergencies_xy[min_index]
+                    self.mock_emergency_indices[i] = actual_indices[min_index]
+                    # fill in emergency target
+                    all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \
+                        torch.from_numpy(self.mock_emergency_target[i])
+                    # predicted_values[i] = batch_predicted_values[min_index]
+                    # logging.debug(
+                    #     f"agent selected Target:"
+                    #     f"({self.mock_emergency_target[i][0].item()},{self.mock_emergency_target[i][1].item()}) "
+                    #     f"with metric value {predicted_values[i]}"
+                    # )
+                # else:
+                # predicted_values[i] = -1
+        return all_obs
+
     def query_and_assign(self, flat_inputs, input_dict):
         if not self._is_train:
             timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0].to(torch.int32)
             logging.debug("NN logged timestep: {}".format(timestep))
             if timestep == 0:
-                for item in ['emergency_mode', 'emergency_target', 'wait_time', 'collision_count']:
+                for item in ['emergency_mode', 'emergency_target']:
                     setattr(self, 'last_' + item, getattr(self, item))
                 # reset network mode
                 self.reset_states()
             else:
-                emergency_status = input_dict['obs']['state'][Constants.VECTOR_STATE][...,
-                                   self.n_agents * (self.n_agents + 4):-1].reshape(-1, 9, 4)
-                emergency_xy = \
-                    torch.stack([emergency_status[..., 0], emergency_status[..., 1]], axis=-1).to(self.device)[0]
-                mapping_dict = {}
-                for i, coordinate in enumerate(emergency_xy):
-                    mapping_dict[tuple(coordinate.cpu().numpy())] = i
-                logging.debug(f"Mapping dict: {mapping_dict}")
-                target_coverage = emergency_status[..., 3].to(self.device)
                 all_obs = flat_inputs[Constants.VECTOR_STATE]
-                predicted_values = torch.zeros((len(all_obs),), device=self.device)
-                logging.debug("predicted_values shape: {}".format(predicted_values.shape))
                 # logging.debug(f"Mode before obs: {self.emergency_mode.cpu().numpy()}")
                 if torch.sum(all_obs) > 0:
+                    numpy_observations = all_obs.cpu().numpy()
+                    emergency_status = input_dict['obs']['state'][Constants.VECTOR_STATE][...,
+                                       self.n_agents * (self.n_agents + 4):-1].reshape(-1, self.emergency_count,
+                                                                                       4).cpu().numpy()
+                    emergency_xy = np.stack((emergency_status[0][..., 0], emergency_status[0][..., 1]), axis=-1)
+                    target_coverage = emergency_status[..., 3]
                     if self.selector_type == 'oracle':
                         # split all_obs into [num_envs] of vectors
                         all_env_obs = all_obs.reshape(-1, self.n_agents, 22)
@@ -408,7 +468,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 actual_agent_id = i * self.n_agents + j
                                 if self.emergency_mode[actual_agent_id] == 1:
                                     # fill in original target
-                                    all_obs[actual_agent_id][20:22] = self.emergency_target[actual_agent_id]
+                                    all_obs[actual_agent_id][self.status_dim:
+                                                             self.status_dim + self.emergency_feature_dim] = (
+                                        self.emergency_target)[actual_agent_id]
                             # get environment state and calculate distance with each agent
                             valid_emergencies_xy = emergency_xy[this_coverage == 0]
                             num_of_emergency = len(valid_emergencies_xy)
@@ -437,70 +499,67 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                             logging.debug(f"Allocated Emergency for agent {agent_id} in env {i}: "
                                                           f"{valid_emergencies_xy[j]}")
                                             # fill in emergency target
-                                            all_obs[agent_actual_index, 20:22] = (
+                                            all_obs[agent_actual_index,
+                                            self.status_dim:self.status_dim + self.emergency_feature_dim] = (
                                                 valid_emergencies_xy[j].to(all_obs.device))
                                             break
                     else:
-                        for i, this_coverage in enumerate(target_coverage):
-                            # logging.debug(f"index: {i}")
-                            if self.emergency_mode[i]:
-                                # check emergency coverage
-                                if this_coverage[mapping_dict[tuple(self.emergency_target[i].cpu().numpy())]]:
-                                    # target is covered, reset emergency mode
-                                    logging.debug(f"Emergency target ({self.emergency_target[i][0].item()},"
-                                                  f"{self.emergency_target[i][1].item()}) is covered by agent")
-                                    self.emergency_mode[i] = 0
-                                    self.emergency_target[i] = -1
-                                    # self.collision_count[i] = 0
-                                    # self.wait_time[i] = 0
-                                else:
-                                    # fill in original target
-                                    all_obs[i][20:22] = self.emergency_target[i]
-                                predicted_values[i] = -1
-                            else:
-
-                                valid_emergencies = this_coverage == 0
-                                valid_emergencies_xy = emergency_xy[valid_emergencies]
-                                num_of_emergency = len(valid_emergencies_xy)
-                                if num_of_emergency > 0:
-                                    # query predictor for new emergency target
-                                    queries_obs = all_obs[i].repeat(len(valid_emergencies_xy), 1).to(self.device)
-                                    queries_obs[..., 20:22] = valid_emergencies_xy.clone().detach()
-                                    with torch.no_grad():
-                                        batch_predicted_values = self.selector(queries_obs)
-                                    # find the min distance
-                                    min_index = torch.argmin(batch_predicted_values)
-                                    # set emergency mode
-                                    self.emergency_mode[i] = 1
-                                    # set emergency target
-                                    self.emergency_target[i] = valid_emergencies_xy[min_index].clone().detach()
-                                    # fill in emergency target
-                                    all_obs[i][20:22] = self.emergency_target[i]
-                                    predicted_values[i] = batch_predicted_values[min_index]
-                                    logging.debug(
-                                        f"agent selected Target:"
-                                        f"({self.emergency_target[i][0].item()},{self.emergency_target[i][1].item()}) "
-                                        f"with metric value {predicted_values[i]}"
-                                    )
-                                else:
-                                    predicted_values[i] = -1
+                        # old_reference = self.old_task_assign_query(target_coverage, emergency_xy,
+                        #                                            all_obs.clone().detach())
+                        (query_batch, actual_emergency_indices, stop_index,
+                         last_round_emergency_agents, allocation_agents) = (
+                            construct_query_batch(
+                                numpy_observations,
+                                self.emergency_mode,
+                                self.emergency_target,
+                                self.emergency_indices,
+                                emergency_xy,
+                                target_coverage,
+                                self.status_dim,
+                                self.emergency_feature_dim
+                            )
+                        )
+                        if query_batch is not None:
+                            query_batch = query_batch.reshape(-1, self.status_dim + self.emergency_feature_dim)
+                            inputs = torch.from_numpy(query_batch).to(self.device)
+                            with torch.no_grad():
+                                outputs = self.selector(inputs).cpu().numpy()
+                                if len(outputs.shape) > 1:
+                                    outputs = outputs.squeeze(-1)
+                            all_obs = construct_final_observation(
+                                numpy_observations,
+                                query_batch,
+                                self.emergency_target,
+                                self.emergency_indices,
+                                actual_emergency_indices,
+                                outputs,
+                                last_round_emergency_agents,
+                                allocation_agents,
+                                stop_index,
+                                self.status_dim,
+                                self.emergency_feature_dim
+                            )
+                            all_obs = torch.from_numpy(all_obs).to(self.device)
+                            # assert torch.all(all_obs == old_reference)
+                            # assert np.all(self.emergency_mode == self.mock_emergency_mode)
+                            # assert np.all(self.emergency_indices == self.mock_emergency_indices)
+                            # assert np.all(self.emergency_target == self.mock_emergency_target)
                 input_dict['obs']['obs']['agents_state'] = all_obs
-            logging.debug(f"Mode after obs: {self.emergency_mode.cpu().numpy()}")
+            logging.debug(f"Mode after obs: {self.emergency_mode[:self.n_agents]}")
+            logging.debug(f"Actual Emergency Indices: {self.emergency_indices[:self.n_agents]}")
             if self.render:
-                self.wait_time_list[timestep] = self.wait_time[:self.n_agents].cpu()
-                self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents].cpu()
-                self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents].cpu()
-                self.wait_time_list[timestep] = self.wait_time[:self.n_agents].cpu()
-                self.collision_count_list[timestep] = self.collision_count[:self.n_agents].cpu()
+                self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents]
+                self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents]
             if timestep == self.episode_length - 1:
                 if self.render:
+                    # WARNING: not modified for numpy.
                     # output all rendering information as csv
                     import pandas as pd
                     # concatenate all rendering information
                     all_rendering_info = torch.cat(
-                        [self.wait_time_list, self.emergency_mode_list,
+                        [self.emergency_mode_list,
                          self.emergency_target_list.reshape(self.episode_length, -1),
-                         self.collision_count_list], dim=-1)
+                         ], dim=-1)
                     # convert to numpy
                     all_rendering_info = all_rendering_info.cpu().numpy()
                     # convert to pandas dataframe
@@ -518,6 +577,94 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
     @override(TorchModelV2)
     def value_function(self) -> TensorType:
         return BaseMLPMixin.value_function(self)
+
+
+@njit
+def construct_query_batch(
+        all_obs: np.ndarray,
+        my_emergency_mode: np.ndarray,
+        my_emergency: np.ndarray,
+        my_emergency_index: np.ndarray,
+        emergency_xy: np.ndarray,
+        target_coverage: np.ndarray,
+        status_dim: int,
+        emergency_feature_dim: int,
+):
+    """
+    set emergency_mode according to coverage status and return a new batch of emergency mode status
+    find valid emergency and put them into the query list (for later inference of predictor)
+    return:
+    new_emergency_mode
+    query_batch
+    agent_bounds_for_emergency
+    """
+    query_obs_list = []
+    query_index_list = []
+    actual_emergency_index_list = []
+    allocation_agent_list = []
+    last_round_emergency = my_emergency_mode.copy()
+
+    start_index = 0
+    for i, this_coverage in enumerate(target_coverage):
+        #     # logging.debug(f"index: {i}")
+        if my_emergency_mode[i]:
+            # check emergency coverage
+            if this_coverage[my_emergency_index[i]]:
+                # target is covered, reset emergency mode
+                # logging.debug("my_emergency_index: {}".format(my_emergency_index[i]))
+                my_emergency_mode[i] = 0
+                my_emergency[i] = -1
+                my_emergency_index[i] = -1
+        else:
+            valid_emergencies = this_coverage == 0
+            actual_emergency_indices = np.nonzero(valid_emergencies)[0]
+            valid_emergencies_xy = emergency_xy[valid_emergencies]
+            num_of_emergency = len(valid_emergencies_xy)
+            if num_of_emergency > 0:
+                # query predictor for new emergency target
+                for emergency in valid_emergencies_xy:
+                    query_obs = all_obs[i].copy()
+                    query_obs[status_dim:status_dim + emergency_feature_dim] = emergency
+                    query_obs_list.extend(query_obs)
+                start_index += num_of_emergency
+                query_index_list.append(start_index)
+                actual_emergency_index_list.extend(actual_emergency_indices)
+                allocation_agent_list.append(i)
+                my_emergency_mode[i] = 1
+    last_round_emergency = np.nonzero(my_emergency_mode & last_round_emergency)[0]
+    # concatenate all queries
+    if len(query_obs_list) > 0:
+        return (np.array(query_obs_list), np.array(actual_emergency_index_list),
+                np.array(query_index_list), last_round_emergency, np.array(allocation_agent_list))
+    else:
+        return (None,) * 5
+
+
+@njit
+def construct_final_observation(
+        all_obs: np.ndarray,
+        query_batch: np.ndarray,
+        my_emergency_target: np.ndarray,
+        my_emergency_indices: np.ndarray,
+        actual_emergency_indices: np.ndarray,
+        predicted_values: np.ndarray,
+        last_round_emergency_mode: np.ndarray,
+        allocation_agent_list: np.ndarray,
+        stop_index: np.ndarray,
+        status_dim: int,
+        emergency_feature_dim: int,
+):
+    start_index = 0
+    for stop, emergency_agent_index in zip(stop_index, allocation_agent_list):
+        argmin_index = np.argmin(predicted_values[start_index:stop])
+        all_obs[emergency_agent_index] = query_batch[start_index + argmin_index]
+        my_emergency_indices[emergency_agent_index] = actual_emergency_indices[start_index + argmin_index]
+        my_emergency_target[emergency_agent_index] = (query_batch[start_index + argmin_index]
+        [status_dim:status_dim + emergency_feature_dim])
+        start_index = stop
+    for index in last_round_emergency_mode:
+        all_obs[index][status_dim:status_dim + emergency_feature_dim] = my_emergency_target[index]
+    return all_obs
 
 
 class CrowdSimAttention(TorchModelV2, nn.Module, BaseMLPMixin):
@@ -589,6 +736,6 @@ def log_emergency_target_draft():
     # if wandb.run is not None and len(predicted_values) >= self.n_agents:
     #     # log agent allocation status
     #     for i in range(self.n_agents):
-    #         wandb.log({"agent_{}_emergency_mode".format(i): self.emergency_mode[i].item()})
+    #         wandb.log({"agent_{}_emergency_mode".format(i): emergency_mode[i].item()})
     #         wandb.log({"agent_{}_emergency_target".format(i): predicted_values[i].item()})
     # self.last_predicted_values = predicted_values
