@@ -381,7 +381,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             # logging.debug(f"index: {i}")
             if self.mock_emergency_mode[i]:
                 # check emergency coverage
-                if this_coverage[self.mock_emergency_indices[i]]:
+                if self.mock_emergency_indices[i] != -1 and this_coverage[self.mock_emergency_indices[i]]:
                     # target is covered, reset emergency mode
                     logging.debug(f"Emergency target ({self.mock_emergency_target[i][0]},"
                                   f"{self.mock_emergency_target[i][1]}) is covered by agent")
@@ -519,6 +519,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 self.emergency_feature_dim
                             )
                         )
+                        logging.debug("actual emergency indices: {}".format(actual_emergency_indices))
                         if query_batch is not None:
                             query_batch = query_batch.reshape(-1, self.status_dim + self.emergency_feature_dim)
                             inputs = torch.from_numpy(query_batch).to(self.device)
@@ -657,9 +658,10 @@ def construct_final_observation(
     start_index = 0
     for stop, emergency_agent_index in zip(stop_index, allocation_agent_list):
         argmin_index = np.argmin(predicted_values[start_index:stop])
-        all_obs[emergency_agent_index] = query_batch[start_index + argmin_index]
-        my_emergency_indices[emergency_agent_index] = actual_emergency_indices[start_index + argmin_index]
-        my_emergency_target[emergency_agent_index] = (query_batch[start_index + argmin_index]
+        offset = start_index + argmin_index
+        all_obs[emergency_agent_index] = query_batch[offset]
+        my_emergency_indices[emergency_agent_index] = actual_emergency_indices[offset]
+        my_emergency_target[emergency_agent_index] = (query_batch[offset]
         [status_dim:status_dim + emergency_feature_dim])
         start_index = stop
     for index in last_round_emergency_mode:

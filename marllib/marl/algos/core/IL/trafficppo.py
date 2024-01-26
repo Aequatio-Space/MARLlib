@@ -401,10 +401,10 @@ def add_regress_loss(
                 for _ in progress:
                     for batch_observations, batch_distances in dataloader:
                         optimizer.zero_grad()
-                        if batch_observations.shape[0] != batch_size:
-                            continue
                         outputs = model.selector(batch_observations.to(model.device))
-                        loss = criterion(outputs.squeeze(), batch_distances.to(model.device))
+                        if len(outputs.shape) > 1:
+                            outputs = outputs.squeeze()
+                        loss = criterion(outputs, batch_distances.to(model.device))
                         loss.backward()
                         mean_loss += loss.detach()
                         optimizer.step()
