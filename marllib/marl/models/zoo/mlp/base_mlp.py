@@ -447,7 +447,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                                                                        4).cpu().numpy()
                     emergency_xy = np.stack((emergency_status[0][..., 0], emergency_status[0][..., 1]), axis=-1)
                     target_coverage = emergency_status[..., 3]
-                    # WARNING: oracle not tested after introducing numba
                     if self.selector_type == 'oracle':
                         # split all_obs into [num_envs] of vectors
                         all_env_obs = all_obs.reshape(-1, self.n_agents, 22)
@@ -459,8 +458,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 if self.emergency_target[actual_agent_id] in covered_emergency:
                                     # reset emergency mode
                                     logging.debug(
-                                        f"Emergency target ({self.emergency_target[actual_agent_id][0].item()},"
-                                        f"{self.emergency_target[actual_agent_id][1].item()}) in env {i} "
+                                        f"Emergency target ({self.emergency_target[actual_agent_id][0]},"
+                                        f"{self.emergency_target[actual_agent_id][1]}) in env {i} "
                                         f"is covered by agent {j}")
                                     self.emergency_mode[actual_agent_id] = 0
                                     self.emergency_target[actual_agent_id] = -1
@@ -470,13 +469,13 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 if self.emergency_mode[actual_agent_id] == 1:
                                     # fill in original target
                                     all_obs[actual_agent_id][self.status_dim:
-                                                             self.status_dim + self.emergency_feature_dim] = (
-                                        self.emergency_target)[actual_agent_id]
+                                                             self.status_dim + self.emergency_feature_dim] = \
+                                        torch.from_numpy(self.emergency_target[actual_agent_id])
                             # get environment state and calculate distance with each agent
-                            valid_emergencies_xy = emergency_xy[this_coverage == 0]
+                            valid_emergencies_xy = torch.from_numpy(emergency_xy[this_coverage == 0])
                             num_of_emergency = len(valid_emergencies_xy)
                             agents_xy = env_obs[..., self.n_agents + 2: self.n_agents + 4].repeat(
-                                num_of_emergency, 1).reshape(num_of_emergency, self.n_agents, 2).to(self.device)
+                                num_of_emergency, 1).reshape(num_of_emergency, self.n_agents, 2).cpu()
                             matrix_emergency = valid_emergencies_xy.repeat(
                                 1, self.n_agents).reshape(num_of_emergency, self.n_agents, 2)
                             distances = torch.norm(agents_xy - matrix_emergency, dim=2)
@@ -485,7 +484,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 is_allocated = False
                                 for agent_emergency in self.emergency_target[
                                                        i * self.n_agents: (i + 1) * self.n_agents]:
-                                    if torch.all(agent_emergency == valid_emergencies_xy[j]):
+                                    if torch.all(torch.from_numpy(agent_emergency) == valid_emergencies_xy[j]):
                                         # this emergency is already allocated
                                         is_allocated = True
                                         break
@@ -524,6 +523,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         logging.debug("actual emergency indices: {}".format(actual_emergency_indices))
                         if query_batch is not None:
                             query_batch = query_batch.reshape(-1, self.status_dim + self.emergency_feature_dim)
+                            assert len(actual_emergency_indices) == len(query_batch)
+                            assert len(stop_index) == len(allocation_agents)
                             inputs = torch.from_numpy(query_batch).to(self.device)
                             with torch.no_grad():
                                 outputs = self.selector(inputs).cpu().numpy()
@@ -597,7 +598,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         return BaseMLPMixin.value_function(self)
 
 
-@njit
+# @njit
 def construct_query_batch(
         all_obs: np.ndarray,
         my_emergency_mode: np.ndarray,
@@ -637,9 +638,11 @@ def construct_query_batch(
         else:
             valid_emergencies = this_coverage == 0
             # set emergencies handled by other agents as invalid too
-            current_emergency_agents = np.nonzero(last_round_emergency[env_num:env_num + n_agents])[0]
+            offset = env_num * n_agents
+            current_emergency_agents = np.nonzero(last_round_emergency[offset:offset + n_agents])[0]
             if len(current_emergency_agents) > 0:
-                valid_emergencies[my_emergency_index[current_emergency_agents]] = False
+                emergency_indices = my_emergency_index[current_emergency_agents]
+                valid_emergencies[np.delete(emergency_indices, np.where(emergency_indices == -1))] = False
             actual_emergency_indices = np.nonzero(valid_emergencies)[0]
             valid_emergencies_xy = emergency_xy[valid_emergencies]
             num_of_emergency = len(valid_emergencies_xy)
