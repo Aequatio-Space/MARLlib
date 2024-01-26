@@ -3,6 +3,7 @@ import datetime
 import logging
 import random
 from numba import njit
+from scipy.optimize import linear_sum_assignment
 import numpy as np
 # Copyright (c) 2023 Replicable-MARL
 
@@ -277,7 +278,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         # self.emergency_label_number = self.emergency_dim // self.emergency_feature_dim + 1
         self.emergency_mode = self.emergency_target = None
         self.emergency_indices = None
-
+        self.with_programming_optimization = True
         self.last_emergency_selection = None
         self.reset_states()
         for item in ['last_emergency_mode', 'last_emergency_target']:
@@ -333,7 +334,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.collision_count_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
         if wandb.run is not None:
             wandb.watch(models=tuple(self.actors), log='all')
-
 
     def reset_states(self):
         self.last_emergency_selection = torch.zeros(self.n_agents, device=self.device)
@@ -447,6 +447,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                                                                        4).cpu().numpy()
                     emergency_xy = np.stack((emergency_status[0][..., 0], emergency_status[0][..., 1]), axis=-1)
                     target_coverage = emergency_status[..., 3]
+                    # WARNING: oracle not tested after introducing numba
                     if self.selector_type == 'oracle':
                         # split all_obs into [num_envs] of vectors
                         all_env_obs = all_obs.reshape(-1, self.n_agents, 22)
@@ -516,7 +517,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 emergency_xy,
                                 target_coverage,
                                 self.status_dim,
-                                self.emergency_feature_dim
+                                self.emergency_feature_dim,
+                                self.n_agents
                             )
                         )
                         logging.debug("actual emergency indices: {}".format(actual_emergency_indices))
@@ -527,12 +529,27 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 outputs = self.selector(inputs).cpu().numpy()
                                 if len(outputs.shape) > 1:
                                     outputs = outputs.squeeze(-1)
+                            if self.with_programming_optimization:
+                                agent_envs = allocation_agents // self.n_agents
+                                agent_stop_index = np.where(np.diff(agent_envs) != 0)[0] + 1
+                                env_stop_index = stop_index[agent_stop_index - 1]
+                                agent_nums = np.unique(agent_envs, return_counts=True)[1]
+                                all_cost_matrix = [matrix.reshape(my_agent_num, -1) for
+                                                   my_agent_num, matrix in
+                                                   zip(agent_nums, np.split(outputs, env_stop_index))]
+                                selected_emergencies = np.full(len(allocation_agents), -1, dtype=np.int32)
+                                for matrix, cur_index in zip(all_cost_matrix, [0] + agent_stop_index.tolist()):
+                                    row_ind, col_ind = linear_sum_assignment(matrix)
+                                    selected_emergencies[cur_index + row_ind] = col_ind
+                            else:
+                                selected_emergencies = np.array([])
                             all_obs = construct_final_observation(
                                 numpy_observations,
                                 query_batch,
                                 self.emergency_target,
                                 self.emergency_indices,
                                 actual_emergency_indices,
+                                selected_emergencies,
                                 outputs,
                                 last_round_emergency_agents,
                                 allocation_agents,
@@ -590,6 +607,7 @@ def construct_query_batch(
         target_coverage: np.ndarray,
         status_dim: int,
         emergency_feature_dim: int,
+        n_agents: int
 ):
     """
     set emergency_mode according to coverage status and return a new batch of emergency mode status
@@ -604,10 +622,10 @@ def construct_query_batch(
     actual_emergency_index_list = []
     allocation_agent_list = []
     last_round_emergency = my_emergency_mode.copy()
-
     start_index = 0
     for i, this_coverage in enumerate(target_coverage):
         #     # logging.debug(f"index: {i}")
+        env_num = i // n_agents
         if my_emergency_mode[i]:
             # check emergency coverage
             if this_coverage[my_emergency_index[i]]:
@@ -618,6 +636,10 @@ def construct_query_batch(
                 my_emergency_index[i] = -1
         else:
             valid_emergencies = this_coverage == 0
+            # set emergencies handled by other agents as invalid too
+            current_emergency_agents = np.nonzero(last_round_emergency[env_num:env_num + n_agents])[0]
+            if len(current_emergency_agents) > 0:
+                valid_emergencies[my_emergency_index[current_emergency_agents]] = False
             actual_emergency_indices = np.nonzero(valid_emergencies)[0]
             valid_emergencies_xy = emergency_xy[valid_emergencies]
             num_of_emergency = len(valid_emergencies_xy)
@@ -648,6 +670,7 @@ def construct_final_observation(
         my_emergency_target: np.ndarray,
         my_emergency_indices: np.ndarray,
         actual_emergency_indices: np.ndarray,
+        selected_emergencies: np.ndarray,
         predicted_values: np.ndarray,
         last_round_emergency_mode: np.ndarray,
         allocation_agent_list: np.ndarray,
@@ -656,13 +679,19 @@ def construct_final_observation(
         emergency_feature_dim: int,
 ):
     start_index = 0
-    for stop, emergency_agent_index in zip(stop_index, allocation_agent_list):
-        argmin_index = np.argmin(predicted_values[start_index:stop])
-        offset = start_index + argmin_index
-        all_obs[emergency_agent_index] = query_batch[offset]
-        my_emergency_indices[emergency_agent_index] = actual_emergency_indices[offset]
-        my_emergency_target[emergency_agent_index] = (query_batch[offset]
-        [status_dim:status_dim + emergency_feature_dim])
+    use_existing_value = True if len(selected_emergencies) == 0 else False
+    # can use np.split, does not know performance.
+    for i, (stop, emergency_agent_index) in enumerate(zip(stop_index, allocation_agent_list)):
+        if use_existing_value:
+            argmin_index = np.argmin(predicted_values[start_index:stop])
+        else:
+            argmin_index = selected_emergencies[i]
+        if argmin_index != -1:
+            offset = start_index + argmin_index
+            all_obs[emergency_agent_index] = query_batch[offset]
+            my_emergency_indices[emergency_agent_index] = actual_emergency_indices[offset]
+            my_emergency_target[emergency_agent_index] = (query_batch[offset]
+            [status_dim:status_dim + emergency_feature_dim])
         start_index = stop
     for index in last_round_emergency_mode:
         all_obs[index][status_dim:status_dim + emergency_feature_dim] = my_emergency_target[index]
