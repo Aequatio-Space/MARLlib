@@ -6,13 +6,12 @@ import os
 import pickle
 import random
 import re
-
+from numba import njit
 import gym
 import logging
 from typing import Dict, List, Type, Union, Optional
 from copy import deepcopy
 import numpy as np
-import torch
 from tqdm import tqdm
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from ray.rllib.agents.ppo import PPOTorchPolicy, DEFAULT_CONFIG as PPO_CONFIG
@@ -100,10 +99,10 @@ def relabel_for_sample_batch(
     """
     relabel expected goal for agents
     """
-    k = 0
-    goal_number = 3
+    # k = 0
+    # goal_number = 3
     use_intrinsic = True
-
+    use_distance_intrinsic = False
     # postprocess of rewards
     num_agents = policy.model.n_agents
     # postprocess extra_batches
@@ -112,20 +111,40 @@ def relabel_for_sample_batch(
         sample_batch[SampleBatch.OBS][..., :status_dim + emergency_dim] = virtual_obs
     except KeyError:
         pass
-    observation_dim = policy.model.status_dim + policy.model.emergency_feature_dim + 100
-    state_agents_dim = (num_agents + 4) * num_agents
-    this_emergency_count = policy.model.emergency_count
-    observation = sample_batch[SampleBatch.OBS]
-    agents_position = observation[..., num_agents + 2: num_agents + 4]
-    emergency_states = (observation[..., observation_dim + state_agents_dim:
-                                         state_agents_dim + observation_dim + this_emergency_count * 4])
-    emergency_states = emergency_states.reshape(-1, this_emergency_count, 4)
-    # extra_batches = [sample_batch.copy() for _ in range(k)]
-    # future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch)
-    # fix_interval_relabeling(extra_batches, 20, num_agents, sample_batch)
-    emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
     if use_intrinsic:
-        modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, sample_batch)
+        observation = sample_batch[SampleBatch.OBS]
+        observation_dim = policy.model.status_dim + policy.model.emergency_feature_dim + 100
+        state_agents_dim = (num_agents + 4) * num_agents
+        this_emergency_count = policy.model.emergency_count
+        emergency_states = (observation[..., observation_dim + state_agents_dim:
+                                             state_agents_dim + observation_dim + this_emergency_count * 4])
+        emergency_states = emergency_states.reshape(-1, this_emergency_count, 4)
+        emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+        if use_distance_intrinsic:
+            agents_position = observation[..., num_agents + 2: num_agents + 4]
+            # extra_batches = [sample_batch.copy() for _ in range(k)]
+            # future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch)
+            # fix_interval_relabeling(extra_batches, 20, num_agents, sample_batch)
+            intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
+        else:
+            assert policy.model.selector_type == 'NN', "only NN selector supports bootstrapping reward."
+            inputs = torch.from_numpy(sample_batch['obs'][..., :status_dim + emergency_dim]).float() * episode_length
+            agent_metric_estimations = policy.model.selector(inputs.to(policy.model.device))
+            if len(agent_metric_estimations) > 0:
+                agent_metric_estimations = agent_metric_estimations.squeeze(-1)
+            age_of_informations = emergency_states[..., 2]
+            mask = emergency_position.sum(axis=-1) != 0
+            all_emergencies_position = np.stack([emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
+            indices = match_aoi(all_emergencies_position, emergency_position, mask)
+            intrinsic = -agent_metric_estimations.cpu().numpy()
+            intrinsic *= (mask * age_of_informations[np.arange(len(age_of_informations)), indices])
+        # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
+        sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
+        sample_batch['intrinsic_rewards'] = intrinsic
+        if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
+            sample_batch[SampleBatch.REWARDS] += torch.from_numpy(intrinsic)
+        else:
+            sample_batch[SampleBatch.REWARDS] += intrinsic
     return label_done_masks_and_calculate_gae_for_sample_batch(policy,
                                                                sample_batch,
                                                                other_agent_batches,
@@ -330,47 +349,52 @@ def modify_batch_with_intrinsic(agents_position, emergency_position, emergency_s
     intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
     # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
     sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
-    sample_batch['intrinsic_rewards'] = intrinsic.cpu().numpy()
+    sample_batch['intrinsic_rewards'] = intrinsic
     if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
         sample_batch[SampleBatch.REWARDS] += torch.from_numpy(intrinsic)
     else:
-        sample_batch[SampleBatch.REWARDS] += sample_batch['intrinsic_rewards']
+        sample_batch[SampleBatch.REWARDS] += intrinsic
 
 
-def calculate_intrinsic(agents_position: Union[torch.Tensor, np.ndarray],
-                        emergency_position: Union[torch.Tensor, np.ndarray],
-                        emergency_states: Union[torch.Tensor, np.ndarray], fake=False, device='cpu'):
+def calculate_intrinsic(agents_position: np.ndarray,
+                        emergency_position: np.ndarray,
+                        emergency_states: np.ndarray,
+                        fake=False,
+                        device='cpu'):
     """
     calculate the intrinsic reward for each agent, which is the product of distance and aoi.
     """
     # mask out penalty where emergency_positions are (0,0), which indicates the agent is not in the emergency.
-    if isinstance(agents_position, np.ndarray):
-        agents_position = torch.from_numpy(agents_position)
-    if isinstance(emergency_position, np.ndarray):
-        emergency_position = torch.from_numpy(emergency_position)
-    if isinstance(emergency_states, np.ndarray):
-        emergency_states = torch.from_numpy(emergency_states)
+
     mask = emergency_position.sum(axis=-1) != 0
-    distances = torch.norm(agents_position - emergency_position, dim=1).to(device)
+    distances = np.linalg.norm(agents_position - emergency_position, axis=1)
     # find [aoi, (x,y)] array in state
     if not fake:
-        age_of_informations, all_emergencies_position = emergency_states[..., 2], torch.stack(
-            [emergency_states[..., 0], emergency_states[..., 1]], dim=-1)
+        age_of_informations, all_emergencies_position = emergency_states[..., 2], np.stack(
+            [emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
     else:
-        age_of_informations = torch.arange(len(agents_position), device=device).float()
+        age_of_informations = np.arange(len(agents_position))
     # find the index of emergency with all_emergencies_position
     if not fake:
-        indices = torch.zeros((len(emergency_position)), dtype=torch.int32)
-        for i, this_timestep_pos in enumerate(emergency_position):
-            if mask[i]:
-                find_index = torch.nonzero(torch.all(all_emergencies_position[i] == this_timestep_pos, dim=1)).squeeze(
-                    -1)
-                if len(find_index) > 0:
-                    indices[i] = find_index[0]
-        intrinsic = -distances * mask * age_of_informations[torch.arange(len(age_of_informations)), indices]
+        indices = match_aoi(all_emergencies_position, emergency_position, mask)
+        intrinsic = -distances * mask * age_of_informations[np.arange(len(age_of_informations)), indices]
     else:
         intrinsic = -distances * age_of_informations
     return intrinsic
+
+
+@njit
+def match_aoi(all_emergencies_position: np.ndarray,
+              emergency_position: np.ndarray,
+              mask: np.ndarray):
+    indices = np.zeros((len(emergency_position)), dtype=np.int32)
+    for i, this_timestep_pos in enumerate(emergency_position):
+        if mask[i]:
+            match_status = all_emergencies_position[i] == this_timestep_pos
+            find_index = np.where((match_status[:, 0] == True) & (match_status[:, 1] == True))[0]
+            if len(find_index) > 0:
+                indices[i] = find_index[0]
+    return indices
 
 
 def add_regress_loss(

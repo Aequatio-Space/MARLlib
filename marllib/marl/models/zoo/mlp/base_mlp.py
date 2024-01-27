@@ -708,37 +708,37 @@ def construct_final_observation(
         status_dim: int,
         emergency_feature_dim: int,
 ):
-    start_index = 0
+    start_index: int = 0
     use_self_greedy = True if len(selected_emergencies) == 0 else False
-    logging.debug("use existing value: {}".format(use_self_greedy))
-    logging.debug("selected emergencies: {}".format(selected_emergencies))
+    # logging.debug("use existing value: {}".format(use_self_greedy))
+    # logging.debug("selected emergencies: {}".format(selected_emergencies))
     # can use np.split, does not know performance.
     for i, (stop, emergency_agent_index) in enumerate(zip(stop_index, allocation_agent_list)):
         if use_self_greedy:
             argmin_index = np.argmin(predicted_values[start_index:stop])
         else:
             argmin_index = selected_emergencies[i]
-        logging.debug("argmin index: {}".format(argmin_index))
+        # logging.debug("argmin index: {}".format(argmin_index))
         if argmin_index != -1:
-            offset = start_index + argmin_index
+            offset = int(start_index + argmin_index)
             all_obs[emergency_agent_index] = query_batch[offset]
             my_emergency_indices[emergency_agent_index] = actual_emergency_indices[offset]
-            my_emergency_target[emergency_agent_index] = (query_batch[offset]
-            [status_dim:status_dim + emergency_feature_dim])
+            my_emergency_target[emergency_agent_index] = query_batch[offset][status_dim:status_dim +
+                                                                                        emergency_feature_dim]
             # print allocation information
-            logging.debug(
-                f"agent {emergency_agent_index} selected Target:"
-                f"({my_emergency_target[emergency_agent_index][0]},{my_emergency_target[emergency_agent_index][1]}) "
-                f"with metric value {predicted_values[offset]}"
-            )
+            # logging.debug(
+            #     f"agent {emergency_agent_index} selected Target:"
+            #     f"({my_emergency_target[emergency_agent_index][0]},{my_emergency_target[emergency_agent_index][1]}) "
+            #     f"with metric value {predicted_values[offset]}"
+            # )
         start_index = stop
     for index in last_round_emergency_mode:
         all_obs[index][status_dim:status_dim + emergency_feature_dim] = my_emergency_target[index]
         # print allocation information
-        logging.debug(
-            f"agent {index} selected Target:"
-            f"({my_emergency_target[index][0]},{my_emergency_target[index][1]}) "
-        )
+        # logging.debug(
+        #     f"agent {index} selected Target:"
+        #     f"({my_emergency_target[index][0]},{my_emergency_target[index][1]}) "
+        # )
     return all_obs
 
 
