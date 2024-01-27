@@ -120,37 +120,42 @@ def relabel_for_sample_batch(
     emergency_states = (observation[..., observation_dim + state_agents_dim:
                                          state_agents_dim + observation_dim + this_emergency_count * 4])
     emergency_states = emergency_states.reshape(-1, this_emergency_count, 4)
-    extra_batches = [sample_batch.copy() for _ in range(k)]
-    future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch)
+    # extra_batches = [sample_batch.copy() for _ in range(k)]
+    # future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch)
     # fix_interval_relabeling(extra_batches, 20, num_agents, sample_batch)
     emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
     if use_intrinsic:
         modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, sample_batch)
-    postprocess_batches = [label_done_masks_and_calculate_gae_for_sample_batch(policy, sample_batch,
-                                                                               other_agent_batches, episode)]
-    for batch in extra_batches:
-        # must copy a batch since the input dict will be equipped with torch interceptor.
-        _ = policy.compute_actions_from_input_dict(batch.copy())
-        batch.update(policy.extra_action_out(batch, [], policy.model, None))
-        if use_intrinsic:
-            if use_large_emergency:
-                # Extract non-zero elements
-                emergency_matrix = batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
-                emergency_position = np.zeros_like(agents_position)
-                for i in range(len(emergency_position)):
-                    indices = np.nonzero(emergency_matrix[i])[0]
-                    if len(indices) != 0:
-                        emergency_position[i] = emergency_matrix[i][indices]
-            else:
-                emergency_matrix = emergency_position = batch[SampleBatch.OBS][...,
-                                                        status_dim:status_dim + emergency_dim]
-            # Reshape the array into the desired format
-            if emergency_matrix.shape[0] != 0:
-                modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, batch)
-        # new_batch = compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
-        new_batch = label_done_masks_and_calculate_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
-        postprocess_batches.append(new_batch)
-    return SampleBatch.concat_samples(postprocess_batches)
+    return label_done_masks_and_calculate_gae_for_sample_batch(policy,
+                                                               sample_batch,
+                                                               other_agent_batches,
+                                                               episode
+                                                               )
+    # postprocess_batches = [label_done_masks_and_calculate_gae_for_sample_batch(policy, sample_batch,
+    #                                                                            other_agent_batches, episode)]
+    # for batch in extra_batches:
+    #     # must copy a batch since the input dict will be equipped with torch interceptor.
+    #     _ = policy.compute_actions_from_input_dict(batch.copy())
+    #     batch.update(policy.extra_action_out(batch, [], policy.model, None))
+    #     if use_intrinsic:
+    #         if use_large_emergency:
+    #             # Extract non-zero elements
+    #             emergency_matrix = batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+    #             emergency_position = np.zeros_like(agents_position)
+    #             for i in range(len(emergency_position)):
+    #                 indices = np.nonzero(emergency_matrix[i])[0]
+    #                 if len(indices) != 0:
+    #                     emergency_position[i] = emergency_matrix[i][indices]
+    #         else:
+    #             emergency_matrix = emergency_position = batch[SampleBatch.OBS][...,
+    #                                                     status_dim:status_dim + emergency_dim]
+    #         # Reshape the array into the desired format
+    #         if emergency_matrix.shape[0] != 0:
+    #             modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, batch)
+    #     # new_batch = compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
+    #     new_batch = label_done_masks_and_calculate_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
+    #     postprocess_batches.append(new_batch)
+    # return SampleBatch.concat_samples(postprocess_batches)
     # try, send relabeled trajectory only.
     # return postprocess_batches[-1]
 
@@ -325,11 +330,11 @@ def modify_batch_with_intrinsic(agents_position, emergency_position, emergency_s
     intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
     # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
     sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
-    sample_batch['intrinsic_rewards'] = intrinsic
+    sample_batch['intrinsic_rewards'] = intrinsic.cpu().numpy()
     if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
-        sample_batch[SampleBatch.REWARDS] += intrinsic
+        sample_batch[SampleBatch.REWARDS] += torch.from_numpy(intrinsic)
     else:
-        sample_batch[SampleBatch.REWARDS] += intrinsic.cpu().numpy()
+        sample_batch[SampleBatch.REWARDS] += sample_batch['intrinsic_rewards']
 
 
 def calculate_intrinsic(agents_position: Union[torch.Tensor, np.ndarray],

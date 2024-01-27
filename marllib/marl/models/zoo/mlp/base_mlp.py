@@ -470,7 +470,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         logging.debug("actual emergency indices: {}".format(actual_emergency_indices))
                         logging.debug("last round emergency agents: {}".format(last_round_emergency_agents))
                         logging.debug("agents about to allocate: {}".format(allocation_agents))
-                        if query_batch is not None:
+                        if len(query_batch) > 0:
                             query_batch = query_batch.reshape(-1, self.status_dim + self.emergency_feature_dim)
                             assert len(actual_emergency_indices) == len(query_batch)
                             assert len(stop_index) == len(allocation_agents)
@@ -493,25 +493,27 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                     selected_emergencies[cur_index + row_ind] = col_ind
                             else:
                                 selected_emergencies = np.array([])
-                            all_obs = construct_final_observation(
-                                numpy_observations,
-                                query_batch,
-                                self.emergency_target,
-                                self.emergency_indices,
-                                actual_emergency_indices,
-                                selected_emergencies,
-                                outputs,
-                                last_round_emergency_agents,
-                                allocation_agents,
-                                stop_index,
-                                self.status_dim,
-                                self.emergency_feature_dim
-                            )
-                            all_obs = torch.from_numpy(all_obs).to(self.device)
-                            # assert torch.all(all_obs == old_reference)
-                            # assert np.all(self.emergency_mode == self.mock_emergency_mode)
-                            # assert np.all(self.emergency_indices == self.mock_emergency_indices)
-                            # assert np.all(self.emergency_target == self.mock_emergency_target)
+                        else:
+                            outputs = selected_emergencies = np.array([])
+                        all_obs = construct_final_observation(
+                            numpy_observations,
+                            query_batch,
+                            self.emergency_target,
+                            self.emergency_indices,
+                            actual_emergency_indices,
+                            selected_emergencies,
+                            outputs,
+                            last_round_emergency_agents,
+                            allocation_agents,
+                            stop_index,
+                            self.status_dim,
+                            self.emergency_feature_dim
+                        )
+                        all_obs = torch.from_numpy(all_obs).to(self.device)
+                        # assert torch.all(all_obs == old_reference)
+                        # assert np.all(self.emergency_mode == self.mock_emergency_mode)
+                        # assert np.all(self.emergency_indices == self.mock_emergency_indices)
+                        # assert np.all(self.emergency_target == self.mock_emergency_target)
                 input_dict['obs']['obs']['agents_state'] = all_obs
             logging.debug(f"Mode after obs: {self.emergency_mode[:self.n_agents]}")
             logging.debug(f"Agent Emergency Indices: {self.emergency_indices[:16]}")
@@ -669,8 +671,8 @@ def construct_query_batch(
             offset = env_num * n_agents
             current_emergency_agents = np.nonzero(last_round_emergency[offset:offset + n_agents])[0]
             if len(current_emergency_agents) > 0:
-                emergency_indices = my_emergency_index[current_emergency_agents + offset]
-                valid_emergencies[np.delete(emergency_indices, np.where(emergency_indices == -1))] = False
+                emergency_indices = my_emergency_index[offset + current_emergency_agents]
+                valid_emergencies[np.delete(emergency_indices, np.where(emergency_indices == -1)[0])] = False
             actual_emergency_indices = np.nonzero(valid_emergencies)[0]
             valid_emergencies_xy = emergency_xy[valid_emergencies]
             num_of_emergency = len(valid_emergencies_xy)
@@ -687,14 +689,11 @@ def construct_query_batch(
                 my_emergency_mode[i] = 1
     last_round_emergency = np.nonzero(my_emergency_mode & last_round_emergency)[0]
     # concatenate all queries
-    if len(query_obs_list) > 0:
-        return (np.array(query_obs_list), np.array(actual_emergency_index_list),
-                np.array(query_index_list), last_round_emergency, np.array(allocation_agent_list))
-    else:
-        return (None,) * 5
+    return (np.array(query_obs_list), np.array(actual_emergency_index_list),
+            np.array(query_index_list), last_round_emergency, np.array(allocation_agent_list))
 
 
-@njit
+# @njit
 def construct_final_observation(
         all_obs: np.ndarray,
         query_batch: np.ndarray,
@@ -710,22 +709,36 @@ def construct_final_observation(
         emergency_feature_dim: int,
 ):
     start_index = 0
-    use_existing_value = True if len(selected_emergencies) == 0 else False
+    use_self_greedy = True if len(selected_emergencies) == 0 else False
+    logging.debug("use existing value: {}".format(use_self_greedy))
+    logging.debug("selected emergencies: {}".format(selected_emergencies))
     # can use np.split, does not know performance.
     for i, (stop, emergency_agent_index) in enumerate(zip(stop_index, allocation_agent_list)):
-        if use_existing_value:
+        if use_self_greedy:
             argmin_index = np.argmin(predicted_values[start_index:stop])
         else:
             argmin_index = selected_emergencies[i]
+        logging.debug("argmin index: {}".format(argmin_index))
         if argmin_index != -1:
             offset = start_index + argmin_index
             all_obs[emergency_agent_index] = query_batch[offset]
             my_emergency_indices[emergency_agent_index] = actual_emergency_indices[offset]
             my_emergency_target[emergency_agent_index] = (query_batch[offset]
             [status_dim:status_dim + emergency_feature_dim])
+            # print allocation information
+            logging.debug(
+                f"agent {emergency_agent_index} selected Target:"
+                f"({my_emergency_target[emergency_agent_index][0]},{my_emergency_target[emergency_agent_index][1]}) "
+                f"with metric value {predicted_values[offset]}"
+            )
         start_index = stop
     for index in last_round_emergency_mode:
         all_obs[index][status_dim:status_dim + emergency_feature_dim] = my_emergency_target[index]
+        # print allocation information
+        logging.debug(
+            f"agent {index} selected Target:"
+            f"({my_emergency_target[index][0]},{my_emergency_target[index][1]}) "
+        )
     return all_obs
 
 
