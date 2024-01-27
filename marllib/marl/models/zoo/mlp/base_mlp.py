@@ -278,7 +278,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         # self.emergency_label_number = self.emergency_dim // self.emergency_feature_dim + 1
         self.emergency_mode = self.emergency_target = None
         self.emergency_indices = None
-        self.with_programming_optimization = True
+        self.with_programming_optimization = self.model_arch_args['with_programming_optimization']
         self.last_emergency_selection = None
         self.reset_states()
         for item in ['last_emergency_mode', 'last_emergency_target']:
@@ -449,60 +449,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     target_coverage = emergency_status[..., 3]
                     if self.selector_type == 'oracle':
                         # split all_obs into [num_envs] of vectors
-                        all_env_obs = all_obs.reshape(-1, self.n_agents, 22)
-                        for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs,
-                                                                         target_coverage[::self.n_agents])):
-                            covered_emergency = emergency_xy[this_coverage == 1]
-                            for j in range(self.n_agents):
-                                actual_agent_id = i * self.n_agents + j
-                                if self.emergency_target[actual_agent_id] in covered_emergency:
-                                    # reset emergency mode
-                                    logging.debug(
-                                        f"Emergency target ({self.emergency_target[actual_agent_id][0]},"
-                                        f"{self.emergency_target[actual_agent_id][1]}) in env {i} "
-                                        f"is covered by agent {j}")
-                                    self.emergency_mode[actual_agent_id] = 0
-                                    self.emergency_target[actual_agent_id] = -1
-                            # reassign the original emergency target for agents who didn't complete the task
-                            for j in range(self.n_agents):
-                                actual_agent_id = i * self.n_agents + j
-                                if self.emergency_mode[actual_agent_id] == 1:
-                                    # fill in original target
-                                    all_obs[actual_agent_id][self.status_dim:
-                                                             self.status_dim + self.emergency_feature_dim] = \
-                                        torch.from_numpy(self.emergency_target[actual_agent_id])
-                            # get environment state and calculate distance with each agent
-                            valid_emergencies_xy = torch.from_numpy(emergency_xy[this_coverage == 0])
-                            num_of_emergency = len(valid_emergencies_xy)
-                            agents_xy = env_obs[..., self.n_agents + 2: self.n_agents + 4].repeat(
-                                num_of_emergency, 1).reshape(num_of_emergency, self.n_agents, 2).cpu()
-                            matrix_emergency = valid_emergencies_xy.repeat(
-                                1, self.n_agents).reshape(num_of_emergency, self.n_agents, 2)
-                            distances = torch.norm(agents_xy - matrix_emergency, dim=2)
-                            # for each valid emergency, find the closest agent
-                            for j in range(num_of_emergency):
-                                is_allocated = False
-                                for agent_emergency in self.emergency_target[
-                                                       i * self.n_agents: (i + 1) * self.n_agents]:
-                                    if torch.all(torch.from_numpy(agent_emergency) == valid_emergencies_xy[j]):
-                                        # this emergency is already allocated
-                                        is_allocated = True
-                                        break
-                                if not is_allocated:
-                                    query_index = torch.argsort(distances[j])
-                                    for agent_id in query_index:
-                                        agent_actual_index = i * self.n_agents + agent_id
-                                        if self.emergency_mode[agent_actual_index] == 0:
-                                            # assign emergency to this agent
-                                            self.emergency_mode[agent_actual_index] = 1
-                                            self.emergency_target[agent_actual_index] = valid_emergencies_xy[j]
-                                            logging.debug(f"Allocated Emergency for agent {agent_id} in env {i}: "
-                                                          f"{valid_emergencies_xy[j]}")
-                                            # fill in emergency target
-                                            all_obs[agent_actual_index,
-                                            self.status_dim:self.status_dim + self.emergency_feature_dim] = (
-                                                valid_emergencies_xy[j].to(all_obs.device))
-                                            break
+                        self.oracle_assignment(all_obs, emergency_xy, target_coverage)
                     else:
                         # old_reference = self.old_task_assign_query(target_coverage, emergency_xy,
                         #                                            all_obs.clone().detach())
@@ -521,6 +468,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                             )
                         )
                         logging.debug("actual emergency indices: {}".format(actual_emergency_indices))
+                        logging.debug("last round emergency agents: {}".format(last_round_emergency_agents))
+                        logging.debug("agents about to allocate: {}".format(allocation_agents))
                         if query_batch is not None:
                             query_batch = query_batch.reshape(-1, self.status_dim + self.emergency_feature_dim)
                             assert len(actual_emergency_indices) == len(query_batch)
@@ -565,7 +514,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                             # assert np.all(self.emergency_target == self.mock_emergency_target)
                 input_dict['obs']['obs']['agents_state'] = all_obs
             logging.debug(f"Mode after obs: {self.emergency_mode[:self.n_agents]}")
-            logging.debug(f"Actual Emergency Indices: {self.emergency_indices[:self.n_agents]}")
+            logging.debug(f"Agent Emergency Indices: {self.emergency_indices[:16]}")
             if self.render:
                 self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents]
                 self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents]
@@ -593,16 +542,95 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             except KeyError:
                 logging.debug("No virtual obs found")
 
+    def oracle_assignment(self, all_obs, emergency_xy, target_coverage):
+        all_env_obs = all_obs.reshape(-1, self.n_agents, 22)
+        for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs,
+                                                         target_coverage[::self.n_agents])):
+            covered_emergency = emergency_xy[this_coverage == 1]
+            offset = i * self.n_agents
+            last_round_emergency = self.emergency_mode[offset:offset + self.n_agents]
+            for j in range(self.n_agents):
+                actual_agent_id = offset + j
+                if self.emergency_target[actual_agent_id] in covered_emergency:
+                    # reset emergency mode
+                    logging.debug(
+                        f"Emergency target ({self.emergency_target[actual_agent_id][0]},"
+                        f"{self.emergency_target[actual_agent_id][1]}) in env {i} "
+                        f"is covered by agent {j}")
+                    self.emergency_mode[actual_agent_id] = 0
+                    self.emergency_target[actual_agent_id] = -1
+                    self.emergency_indices[actual_agent_id] = -1
+            # reassign the original emergency target for agents who didn't complete the task
+            for j in range(self.n_agents):
+                actual_agent_id = offset + j
+                if self.emergency_mode[actual_agent_id] == 1:
+                    # fill in original target
+                    all_obs[actual_agent_id][self.status_dim:
+                                             self.status_dim + self.emergency_feature_dim] = \
+                        torch.from_numpy(self.emergency_target[actual_agent_id])
+            # get environment state and calculate distance with each agent
+            valid_emergencies = this_coverage == 0
+            current_emergency_agents = np.nonzero(last_round_emergency)[0]
+            # temporary measure, leave the valid_emergencies untouched and let past logic handle
+            # duplicate assignment.
+            if self.with_programming_optimization and len(current_emergency_agents) > 0:
+                emergency_indices = self.emergency_indices[current_emergency_agents + offset]
+                valid_emergencies[np.delete(emergency_indices, np.where(emergency_indices == -1))] = False
+            valid_emergencies_xy = emergency_xy[valid_emergencies]
+            num_of_emergency = len(valid_emergencies_xy)
+            if num_of_emergency > 0:
+                agents_xy = env_obs[..., self.n_agents + 2: self.n_agents + 4].repeat(
+                    num_of_emergency, 1).reshape(num_of_emergency, self.n_agents, 2).cpu()
+                matrix_emergency = np.tile(valid_emergencies_xy, reps=self.n_agents).reshape(
+                    num_of_emergency, self.n_agents, 2
+                )
+                distances = np.linalg.norm(agents_xy - matrix_emergency, axis=2)
+                # for each valid emergency, find the closest agent
+                if self.with_programming_optimization:
+                    row_ind, col_ind = linear_sum_assignment(distances.T)
+                    actual_agent_indices = offset + row_ind
+                    self.emergency_mode[actual_agent_indices] = 1
+                    selected_emergencies = valid_emergencies_xy[col_ind]
+                    self.emergency_target[actual_agent_indices] = selected_emergencies
+                    self.emergency_indices[actual_agent_indices] = col_ind
+                    all_obs[actual_agent_indices,
+                    self.status_dim:self.status_dim + self.emergency_feature_dim] = \
+                        torch.from_numpy(selected_emergencies).to(self.device)
+                else:
+                    for j in range(num_of_emergency):
+                        is_allocated = False
+                        for agent_emergency in self.emergency_target[
+                                               i * self.n_agents: (i + 1) * self.n_agents]:
+                            if np.all(agent_emergency == valid_emergencies_xy[j]):
+                                # this emergency is already allocated
+                                is_allocated = True
+                                break
+                        if not is_allocated:
+                            query_index = np.argsort(distances[j])
+                            for agent_id in query_index:
+                                agent_actual_index = offset + agent_id
+                                if self.emergency_mode[agent_actual_index] == 0:
+                                    # assign emergency to this agent
+                                    self.emergency_mode[agent_actual_index] = 1
+                                    self.emergency_target[agent_actual_index] = valid_emergencies_xy[j]
+                                    logging.debug(f"Allocated Emergency for agent {agent_id} in env {i}: "
+                                                  f"{valid_emergencies_xy[j]}")
+                                    # fill in emergency target
+                                    all_obs[agent_actual_index,
+                                    self.status_dim:self.status_dim + self.emergency_feature_dim] = \
+                                        torch.from_numpy(valid_emergencies_xy[j])
+                                    break
+
     @override(TorchModelV2)
     def value_function(self) -> TensorType:
         return BaseMLPMixin.value_function(self)
 
 
-# @njit
+@njit
 def construct_query_batch(
         all_obs: np.ndarray,
         my_emergency_mode: np.ndarray,
-        my_emergency: np.ndarray,
+        my_emergency_target: np.ndarray,
         my_emergency_index: np.ndarray,
         emergency_xy: np.ndarray,
         target_coverage: np.ndarray,
@@ -633,7 +661,7 @@ def construct_query_batch(
                 # target is covered, reset emergency mode
                 # logging.debug("my_emergency_index: {}".format(my_emergency_index[i]))
                 my_emergency_mode[i] = 0
-                my_emergency[i] = -1
+                my_emergency_target[i] = -1
                 my_emergency_index[i] = -1
         else:
             valid_emergencies = this_coverage == 0
@@ -641,7 +669,7 @@ def construct_query_batch(
             offset = env_num * n_agents
             current_emergency_agents = np.nonzero(last_round_emergency[offset:offset + n_agents])[0]
             if len(current_emergency_agents) > 0:
-                emergency_indices = my_emergency_index[current_emergency_agents]
+                emergency_indices = my_emergency_index[current_emergency_agents + offset]
                 valid_emergencies[np.delete(emergency_indices, np.where(emergency_indices == -1))] = False
             actual_emergency_indices = np.nonzero(valid_emergencies)[0]
             valid_emergencies_xy = emergency_xy[valid_emergencies]
