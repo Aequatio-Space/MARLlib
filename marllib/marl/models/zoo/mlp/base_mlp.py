@@ -1,7 +1,9 @@
 # MIT License
 import datetime
 import logging
+import os
 import random
+import pandas as pd
 from numba import njit
 from scipy.optimize import linear_sum_assignment
 import numpy as np
@@ -35,6 +37,8 @@ from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.typing import Dict, TensorType, List
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
 from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
+
+from warp_drive.utils.common import get_project_root
 from warp_drive.utils.constants import Constants
 
 torch, nn = try_import_torch()
@@ -273,8 +277,14 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.num_envs = self.custom_config["num_envs"]
         self.status_dim = self.custom_config["status_dim"]
         self.gen_interval = self.model_arch_args['gen_interval']
+        self.dataset_name = self.model_arch_args['dataset']
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
-        self.emergency_count = int(((self.episode_length / self.gen_interval) - 1) * (self.n_agents - 1))
+        emergency_path_name = os.path.join(get_project_root(), 'datasets', self.dataset_name, 'emergency_time_loc.csv')
+        if os.path.exists(emergency_path_name):
+            emergency_csv = pd.read_csv(emergency_path_name)
+            self.emergency_count = len(emergency_csv)
+        else:
+            self.emergency_count = int(((self.episode_length / self.gen_interval) - 1) * (self.n_agents - 1))
         # self.emergency_label_number = self.emergency_dim // self.emergency_feature_dim + 1
         self.emergency_mode = self.emergency_target = None
         self.emergency_indices = None
@@ -329,9 +339,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         if self.render:
             # self.wait_time_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
             self.emergency_mode_list = np.zeros([self.episode_length, self.n_agents], dtype=np.bool_)
-            self.emergency_target_list = np.zeros([self.episode_length, self.n_agents, 2], device=self.device)
+            self.emergency_target_list = np.zeros([self.episode_length, self.n_agents, 2])
             # self.wait_time_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
-            self.collision_count_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
+            # self.collision_count_list = torch.zeros([self.episode_length, self.n_agents])
         if wandb.run is not None:
             wandb.watch(models=tuple(self.actors), log='all')
 
@@ -525,13 +535,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     # WARNING: not modified for numpy.
                     # output all rendering information as csv
                     import pandas as pd
+                    from datetime import datetime
                     # concatenate all rendering information
-                    all_rendering_info = torch.cat(
+                    all_rendering_info = np.concatenate(
                         [self.emergency_mode_list,
                          self.emergency_target_list.reshape(self.episode_length, -1),
-                         ], dim=-1)
-                    # convert to numpy
-                    all_rendering_info = all_rendering_info.cpu().numpy()
+                         ], axis=-1)
                     # convert to pandas dataframe
                     all_rendering_info = pd.DataFrame(all_rendering_info)
                     # save to csv

@@ -99,10 +99,10 @@ def relabel_for_sample_batch(
     """
     relabel expected goal for agents
     """
-    # k = 0
-    # goal_number = 3
+    k = 0
+    goal_number = 5
     use_intrinsic = True
-    use_distance_intrinsic = False
+    use_distance_intrinsic = True
     # postprocess of rewards
     num_agents = policy.model.n_agents
     # postprocess extra_batches
@@ -111,6 +111,8 @@ def relabel_for_sample_batch(
         sample_batch[SampleBatch.OBS][..., :status_dim + emergency_dim] = virtual_obs
     except KeyError:
         pass
+    extra_batches = [sample_batch.copy() for _ in range(k)]
+    future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch)
     if use_intrinsic:
         observation = sample_batch[SampleBatch.OBS]
         observation_dim = policy.model.status_dim + policy.model.emergency_feature_dim + 100
@@ -122,9 +124,6 @@ def relabel_for_sample_batch(
         emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
         if use_distance_intrinsic:
             agents_position = observation[..., num_agents + 2: num_agents + 4]
-            # extra_batches = [sample_batch.copy() for _ in range(k)]
-            # future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch)
-            # fix_interval_relabeling(extra_batches, 20, num_agents, sample_batch)
             intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
         else:
             assert policy.model.selector_type == 'NN', "only NN selector supports bootstrapping reward."
@@ -145,38 +144,37 @@ def relabel_for_sample_batch(
             sample_batch[SampleBatch.REWARDS] += torch.from_numpy(intrinsic)
         else:
             sample_batch[SampleBatch.REWARDS] += intrinsic
-    return label_done_masks_and_calculate_gae_for_sample_batch(policy,
-                                                               sample_batch,
-                                                               other_agent_batches,
-                                                               episode
-                                                               )
-    # postprocess_batches = [label_done_masks_and_calculate_gae_for_sample_batch(policy, sample_batch,
-    #                                                                            other_agent_batches, episode)]
-    # for batch in extra_batches:
-    #     # must copy a batch since the input dict will be equipped with torch interceptor.
-    #     _ = policy.compute_actions_from_input_dict(batch.copy())
-    #     batch.update(policy.extra_action_out(batch, [], policy.model, None))
-    #     if use_intrinsic:
-    #         if use_large_emergency:
-    #             # Extract non-zero elements
-    #             emergency_matrix = batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
-    #             emergency_position = np.zeros_like(agents_position)
-    #             for i in range(len(emergency_position)):
-    #                 indices = np.nonzero(emergency_matrix[i])[0]
-    #                 if len(indices) != 0:
-    #                     emergency_position[i] = emergency_matrix[i][indices]
-    #         else:
-    #             emergency_matrix = emergency_position = batch[SampleBatch.OBS][...,
-    #                                                     status_dim:status_dim + emergency_dim]
-    #         # Reshape the array into the desired format
-    #         if emergency_matrix.shape[0] != 0:
-    #             modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, batch)
-    #     # new_batch = compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
-    #     new_batch = label_done_masks_and_calculate_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
-    #     postprocess_batches.append(new_batch)
-    # return SampleBatch.concat_samples(postprocess_batches)
+    # return label_done_masks_and_calculate_gae_for_sample_batch(policy,
+    #                                                            sample_batch,
+    #                                                            other_agent_batches,
+    #                                                            episode
+    #                                                            )
+    postprocess_batches = [label_done_masks_and_calculate_gae_for_sample_batch(policy, sample_batch,
+                                                                               other_agent_batches, episode)]
+    for batch in extra_batches:
+        # must copy a batch since the input dict will be equipped with torch interceptor.
+        _ = policy.compute_actions_from_input_dict(batch.copy())
+        batch.update(policy.extra_action_out(batch, [], policy.model, None))
+        if use_intrinsic:
+            if use_large_emergency:
+                # Extract non-zero elements
+                emergency_matrix = batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+                emergency_position = np.zeros_like(agents_position)
+                for i in range(len(emergency_position)):
+                    indices = np.nonzero(emergency_matrix[i])[0]
+                    if len(indices) != 0:
+                        emergency_position[i] = emergency_matrix[i][indices]
+            else:
+                emergency_matrix = emergency_position = batch[SampleBatch.OBS][...,
+                                                        status_dim:status_dim + emergency_dim]
+            # Reshape the array into the desired format
+            if emergency_matrix.shape[0] != 0:
+                modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, batch)
+        # new_batch = compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
+        new_batch = label_done_masks_and_calculate_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
+        postprocess_batches.append(new_batch)
+    return SampleBatch.concat_samples(postprocess_batches)
     # try, send relabeled trajectory only.
-    # return postprocess_batches[-1]
 
 
 def label_done_masks_and_calculate_gae_for_sample_batch(
@@ -403,7 +401,7 @@ def add_regress_loss(
         train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
     if hasattr(model, "selector_type") and model.selector_type == 'NN':
         batch_size = 32
-        learning_rate = 0.001
+        learning_rate = 0.001 if model.render is False else 0
         epochs = 1
         criterion = nn.MSELoss()
         optimizer = optim.Adam(model.parameters(), lr=learning_rate)
