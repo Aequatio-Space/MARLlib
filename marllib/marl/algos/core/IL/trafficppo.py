@@ -7,7 +7,6 @@ import pickle
 import random
 import re
 from numba import njit
-import gym
 import logging
 from typing import Dict, List, Type, Union, Optional
 from copy import deepcopy
@@ -27,15 +26,7 @@ from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.typing import TensorType, TrainerConfigDict, AgentID
 from torch import optim
 
-EMERGENCY_REWARD_INCREMENT = 10
-
-status_dim = 20
-
-emergency_features = 2
-
-emergency_count = 9
-
-emergency_dim = emergency_features
+EMERGENCY_REWARD_INCREMENT = 5.0
 
 torch, nn = try_import_torch()
 
@@ -103,6 +94,9 @@ def relabel_for_sample_batch(
     goal_number = 5
     use_intrinsic = True
     use_distance_intrinsic = True
+    this_emergency_count = policy.model.emergency_count
+    status_dim = policy.model.status_dim
+    emergency_dim = policy.model.emergency_feature_dim
     # postprocess of rewards
     num_agents = policy.model.n_agents
     # postprocess extra_batches
@@ -112,18 +106,17 @@ def relabel_for_sample_batch(
     except KeyError:
         pass
     extra_batches = [sample_batch.copy() for _ in range(k)]
-    future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch)
+    future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch, policy)
+    observation = sample_batch[SampleBatch.OBS]
+    observation_dim = status_dim + emergency_dim + 100
+    state_agents_dim = (num_agents + 4) * num_agents
+    emergency_states = (observation[..., observation_dim + state_agents_dim:
+                                         state_agents_dim + observation_dim + this_emergency_count * 4])
+    emergency_states = emergency_states.reshape(-1, this_emergency_count, 4)
+    agents_position = observation[..., num_agents + 2: num_agents + 4]
     if use_intrinsic:
-        observation = sample_batch[SampleBatch.OBS]
-        observation_dim = policy.model.status_dim + policy.model.emergency_feature_dim + 100
-        state_agents_dim = (num_agents + 4) * num_agents
-        this_emergency_count = policy.model.emergency_count
-        emergency_states = (observation[..., observation_dim + state_agents_dim:
-                                             state_agents_dim + observation_dim + this_emergency_count * 4])
-        emergency_states = emergency_states.reshape(-1, this_emergency_count, 4)
         emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
         if use_distance_intrinsic:
-            agents_position = observation[..., num_agents + 2: num_agents + 4]
             intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
         else:
             assert policy.model.selector_type == 'NN', "only NN selector supports bootstrapping reward."
@@ -182,6 +175,8 @@ def label_done_masks_and_calculate_gae_for_sample_batch(
         sample_batch: SampleBatch,
         other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
         episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
+    status_dim = policy.model.status_dim
+    emergency_dim = policy.model.emergency_feature_dim
     separate_batches = []
     last_index = 0
     # check whether numbers between status_dim:status_dim + emergency_dim are all zeros, one row per value
@@ -220,7 +215,14 @@ def label_done_masks_and_calculate_gae_for_sample_batch(
     return compute_gae_for_sample_batch(policy, full_batch, other_agent_batches, episode)
 
 
-def fix_interval_relabeling(extra_batches, goal_number, num_agents, sample_batch):
+def fix_interval_relabeling(extra_batches, goal_number, num_agents, sample_batch, policy: TorchPolicy):
+    status_dim = policy.model.status_dim
+    emergency_features = policy.model.emergency_feature_dim
+    emergency_count = policy.model.emergency_count
+    if use_large_emergency:
+        emergency_dim = emergency_count * emergency_features
+    else:
+        emergency_dim = emergency_features
     for i in range(len(extra_batches)):
         original_batch = extra_batches[i]
         original_obs = original_batch[SampleBatch.OBS]
@@ -242,7 +244,9 @@ def fix_interval_relabeling(extra_batches, goal_number, num_agents, sample_batch
         extra_batches[i] = original_batch
 
 
-def mapping_relabeling(extra_batches, start_timestep, num_agents, sample_batch):
+def mapping_relabeling(extra_batches, start_timestep, num_agents, sample_batch, policy: TorchPolicy):
+    status_dim = policy.model.status_dim
+    emergency_features = emergency_dim = policy.model.emergency_feature_dim
     for i in range(len(extra_batches)):
         original_batch = extra_batches[i]
         obs_shape = original_batch[SampleBatch.OBS].shape
@@ -256,7 +260,14 @@ def mapping_relabeling(extra_batches, start_timestep, num_agents, sample_batch):
         extra_batches[i] = original_batch
 
 
-def future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch):
+def future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch, policy: TorchPolicy):
+    status_dim = policy.model.status_dim
+    emergency_feature_dim = policy.model.emergency_feature_dim
+    emergency_count = policy.model.emergency_count
+    if use_large_emergency:
+        emergency_features = emergency_count * emergency_feature_dim
+    else:
+        emergency_features = emergency_feature_dim
     # try relabeling at the first column only?
     for i in range(len(extra_batches)):
         original_batch = extra_batches[i]
@@ -280,7 +291,7 @@ def future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_
             logging.debug(f"emergency_location: {emergency_location}")
             goal_to_fill = agents_position[sequence[fill_index]]
             while j < obs_shape[0]:
-                original_obs[j][status_dim:status_dim + emergency_dim] = 0
+                original_obs[j][status_dim:status_dim + emergency_features] = 0
                 original_obs[j][status_dim + emergency_location:
                                 status_dim + emergency_location + emergency_features] = goal_to_fill
                 if np.linalg.norm(goal_to_fill - agents_position[j]) < 0.05:
@@ -322,6 +333,8 @@ def compute_gae_and_intrinsic_for_sample_batch(
     """
 
     # postprocess of rewards
+    status_dim = policy.model.status_dim
+    emergency_dim = policy.model.emergency_feature_dim
     if other_agent_batches is not None:
         num_agents = len(other_agent_batches) + 1
     else:
@@ -370,13 +383,11 @@ def calculate_intrinsic(agents_position: np.ndarray,
     if not fake:
         age_of_informations, all_emergencies_position = emergency_states[..., 2], np.stack(
             [emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
-    else:
-        age_of_informations = np.arange(len(agents_position))
-    # find the index of emergency with all_emergencies_position
-    if not fake:
         indices = match_aoi(all_emergencies_position, emergency_position, mask)
         intrinsic = -distances * mask * age_of_informations[np.arange(len(age_of_informations)), indices]
     else:
+        age_of_informations = np.arange(len(agents_position))
+        # find the index of emergency with all_emergencies_position
         intrinsic = -distances * age_of_informations
     return intrinsic
 
@@ -399,6 +410,8 @@ def add_regress_loss(
         policy: Policy, model: ModelV2,
         dist_class: Type[TorchDistributionWrapper],
         train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
+    status_dim = policy.model.status_dim
+    emergency_dim = policy.model.emergency_feature_dim
     if hasattr(model, "selector_type") and model.selector_type == 'NN':
         batch_size = 32
         learning_rate = 0.001 if model.render is False else 0
