@@ -277,6 +277,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.num_envs = self.custom_config["num_envs"]
         self.status_dim = self.custom_config["status_dim"]
         self.gen_interval = self.model_arch_args['gen_interval']
+        self.emergency_threshold = self.model_arch_args['emergency_threshold']
         self.dataset_name = self.model_arch_args['dataset']
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
         emergency_path_name = os.path.join(get_project_root(), 'datasets', self.dataset_name, 'emergency_time_loc.csv')

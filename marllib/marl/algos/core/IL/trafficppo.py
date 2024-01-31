@@ -117,7 +117,8 @@ def relabel_for_sample_batch(
     if use_intrinsic:
         emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
         if use_distance_intrinsic:
-            intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
+            intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
+                                            emergency_threshold=policy.model.emergency_threshold)
         else:
             assert policy.model.selector_type == 'NN', "only NN selector supports bootstrapping reward."
             inputs = torch.from_numpy(sample_batch['obs'][..., :status_dim + emergency_dim]).float() * episode_length
@@ -356,8 +357,9 @@ def compute_gae_and_intrinsic_for_sample_batch(
     return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
 
 
-def modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, sample_batch):
-    intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states)
+def modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, sample_batch,
+                                emergency_threshold=0):
+    intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states, emergency_threshold)
     # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
     sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
     sample_batch['intrinsic_rewards'] = intrinsic
@@ -370,6 +372,7 @@ def modify_batch_with_intrinsic(agents_position, emergency_position, emergency_s
 def calculate_intrinsic(agents_position: np.ndarray,
                         emergency_position: np.ndarray,
                         emergency_states: np.ndarray,
+                        emergency_threshold: int,
                         fake=False,
                         device='cpu'):
     """
@@ -384,7 +387,9 @@ def calculate_intrinsic(agents_position: np.ndarray,
         age_of_informations, all_emergencies_position = emergency_states[..., 2], np.stack(
             [emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
         indices = match_aoi(all_emergencies_position, emergency_position, mask)
-        intrinsic = -distances * mask * age_of_informations[np.arange(len(age_of_informations)), indices]
+        fetched_aois = age_of_informations[np.arange(len(age_of_informations)), indices]
+        mask &= fetched_aois > emergency_threshold
+        intrinsic = -distances * mask * fetched_aois
     else:
         age_of_informations = np.arange(len(agents_position))
         # find the index of emergency with all_emergencies_position
@@ -534,7 +539,7 @@ def increasing_intrinsic_relabeling(model, train_batch, virtual_obs):
             obs_to_be_relabeled[..., 20:22] = agent_position[-1]
             train_batch['intrinsic_rewards'][fragment] = calculate_intrinsic(
                 agent_position, emergency_position, torch.zeros(1, device=model.device),
-                fake=True, device=model.device).to(torch.float32).to(train_batch_device)
+                fake=True, device=model.device, emergency_threshold=0).to(torch.float32).to(train_batch_device)
             train_batch[SampleBatch.REWARDS][fragment] = (train_batch['original_rewards'][fragment] +
                                                           train_batch['intrinsic_rewards'][fragment])
             # additional complete bonus
