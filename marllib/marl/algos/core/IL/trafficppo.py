@@ -93,7 +93,10 @@ def relabel_for_sample_batch(
     k = 0
     goal_number = 5
     use_intrinsic = True
-    use_distance_intrinsic = True
+    selector_type = policy.model.selector_type
+    use_distance_intrinsic = selector_type != 'NN' or policy.model.step_count < policy.model.switch_step
+    # logging.debug("use_distance_intrinsic: %s", use_distance_intrinsic)
+    # logging.debug("step_count: %d, switch_step: %d", policy.model.step_count, policy.model.switch_step)
     this_emergency_count = policy.model.emergency_count
     status_dim = policy.model.status_dim
     emergency_dim = policy.model.emergency_feature_dim
@@ -120,8 +123,8 @@ def relabel_for_sample_batch(
             intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
                                             emergency_threshold=policy.model.emergency_threshold)
         else:
-            assert policy.model.selector_type == 'NN', "only NN selector supports bootstrapping reward."
-            inputs = torch.from_numpy(sample_batch['obs'][..., :status_dim + emergency_dim]).float() * episode_length
+            assert selector_type == 'NN', "only NN selector supports bootstrapping reward."
+            inputs = torch.from_numpy(sample_batch['obs'][..., :status_dim + emergency_dim]).float()
             agent_metric_estimations = policy.model.selector(inputs.to(policy.model.device))
             if len(agent_metric_estimations) > 0:
                 agent_metric_estimations = agent_metric_estimations.squeeze(-1)

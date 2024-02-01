@@ -82,7 +82,8 @@ class Predictor(nn.Module):
                 in_size=hidden_size,
                 out_size=output_dim,
                 initializer=normc_initializer(0.01),
-                activation_fn=None),
+                activation_fn=nn.Sigmoid),
+            # activation_fn=None),
         )
 
     def forward(self, x):
@@ -264,6 +265,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.selector_type = (self.model_arch_args['selector_type'] or
                               self.custom_config["selector_type"])
         self.episode_length = 120
+        self.switch_step = self.model_arch_args['switch_step']
+        self.step_count = 0
         self.render = self.model_arch_args['render']
         if self.render:
             self.render_file_name = self.model_arch_args['render_file_name']
@@ -280,11 +283,13 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_threshold = self.model_arch_args['emergency_threshold']
         self.dataset_name = self.model_arch_args['dataset']
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
-        emergency_path_name = os.path.join(get_project_root(), 'datasets', self.dataset_name, 'emergency_time_loc.csv')
+        emergency_path_name = os.path.join(get_project_root(), 'datasets',
+                                           self.dataset_name, 'emergency_time_loc_0900_0930.csv')
         if os.path.exists(emergency_path_name):
-            emergency_csv = pd.read_csv(emergency_path_name)
-            self.emergency_count = len(emergency_csv)
+            self.unique_emergencies = pd.read_csv(emergency_path_name)
+            self.emergency_count = len(self.unique_emergencies)
         else:
+            self.unique_emergencies = None
             self.emergency_count = int(((self.episode_length / self.gen_interval) - 1) * (self.n_agents - 1))
         # self.emergency_label_number = self.emergency_dim // self.emergency_feature_dim + 1
         self.emergency_mode = self.emergency_target = None
@@ -553,6 +558,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     # save to csv
                     datatime_str = datetime.now().strftime("%Y%m%d-%H%M%S")
                     all_rendering_info.to_csv(f"{self.render_file_name}_{datatime_str}.csv")
+                self.step_count += self.episode_length * self.num_envs
             self.last_virtual_obs = input_dict['obs']['obs']['agents_state']
         else:
             try:
