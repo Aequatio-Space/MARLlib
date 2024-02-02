@@ -1,11 +1,12 @@
 # MIT License
-import datetime
 import logging
 import os
 import random
 import pandas as pd
 from numba import njit
-from scipy.optimize import linear_sum_assignment
+from collections import deque
+import scipy.optimize
+from scipy.optimize import linear_sum_assignment, milp, LinearConstraint
 import numpy as np
 # Copyright (c) 2023 Replicable-MARL
 
@@ -42,6 +43,14 @@ from warp_drive.utils.common import get_project_root
 from warp_drive.utils.constants import Constants
 
 torch, nn = try_import_torch()
+
+
+def generate_identity_matrices(n, m):
+    # Generate n identity matrices of size m
+    identity_matrices = [np.eye(m) for _ in range(n)]
+    # Stack the identity matrices horizontally
+    result = np.hstack(identity_matrices)
+    return result
 
 
 def argmax_to_mask(argmax_indices, num_classes=4, num_coords=2):
@@ -292,9 +301,11 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.unique_emergencies = None
             self.emergency_count = int(((self.episode_length / self.gen_interval) - 1) * (self.n_agents - 1))
         # self.emergency_label_number = self.emergency_dim // self.emergency_feature_dim + 1
-        self.emergency_mode = self.emergency_target = None
+        self.emergency_mode = self.emergency_target = self.emergency_queue = None
         self.emergency_indices = None
         self.with_programming_optimization = self.model_arch_args['with_programming_optimization']
+        # self.one_agent_multi_task = self.model_arch_args['one_agent_multi_task']
+        self.one_agent_multi_task = False
         self.last_emergency_selection = None
         self.reset_states()
         for item in ['last_emergency_mode', 'last_emergency_target']:
@@ -356,6 +367,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
         self.emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
         self.emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
+        self.emergency_queue = [deque() for _ in range(self.n_agents * self.num_envs)]
         # same mode, indices, target with "mock" for testing
         # self.mock_emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
         # self.mock_emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
@@ -478,6 +490,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 numpy_observations,
                                 self.emergency_mode,
                                 self.emergency_target,
+                                self.emergency_queue,
                                 self.emergency_indices,
                                 emergency_xy,
                                 target_coverage,
@@ -503,15 +516,25 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 agent_stop_index = np.where(np.diff(agent_envs) != 0)[0] + 1
                                 env_stop_index = stop_index[agent_stop_index - 1]
                                 agent_nums = np.unique(agent_envs, return_counts=True)[1]
-                                all_cost_matrix = [matrix.reshape(my_agent_num, -1) for
-                                                   my_agent_num, matrix in
-                                                   zip(agent_nums, np.split(outputs, env_stop_index))]
-                                selected_emergencies = np.full(len(allocation_agents), -1, dtype=np.int32)
-                                for matrix, cur_index in zip(all_cost_matrix, [0] + agent_stop_index.tolist()):
-                                    row_ind, col_ind = linear_sum_assignment(matrix)
-                                    logging.debug("Greedy Cost Function")
-                                    logging.debug(matrix)
-                                    selected_emergencies[cur_index + row_ind] = col_ind
+                                if self.one_agent_multi_task:
+                                    flatten_costs = np.split(outputs, env_stop_index)
+                                    for flatten_cost in flatten_costs:
+                                        lb = ub = np.ones(tasks)
+                                        task_constraint = LinearConstraint(A, lb, ub)
+                                        integrality = np.ones(n_agents * tasks)
+                                        bounds = optimize.Bounds(0, 1)
+                                        result = milp(flatten_cost, integrality=integrality, bounds=bounds,
+                                                      constraints=task_constraint)
+                                else:
+                                    all_cost_matrix = [matrix.reshape(my_agent_num, -1) for
+                                                       my_agent_num, matrix in
+                                                       zip(agent_nums, np.split(outputs, env_stop_index))]
+                                    selected_emergencies = np.full(len(allocation_agents), -1, dtype=np.int32)
+                                    for matrix, cur_index in zip(all_cost_matrix, [0] + agent_stop_index.tolist()):
+                                        row_ind, col_ind = linear_sum_assignment(matrix)
+                                        logging.debug("Greedy Cost Function")
+                                        logging.debug(matrix)
+                                        selected_emergencies[cur_index + row_ind] = col_ind
                             else:
                                 selected_emergencies = np.array([])
                         else:
@@ -656,11 +679,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         return BaseMLPMixin.value_function(self)
 
 
-@njit
+# @njit
 def construct_query_batch(
         all_obs: np.ndarray,
         my_emergency_mode: np.ndarray,
         my_emergency_target: np.ndarray,
+        my_emergency_queue: list[deque],
         my_emergency_index: np.ndarray,
         emergency_xy: np.ndarray,
         target_coverage: np.ndarray,
@@ -683,13 +707,18 @@ def construct_query_batch(
     last_round_emergency = my_emergency_mode.copy()
     start_index = 0
     for i, this_coverage in enumerate(target_coverage):
+        my_queue: deque = my_emergency_queue[i]
         #     # logging.debug(f"index: {i}")
         if my_emergency_mode[i] and this_coverage[my_emergency_index[i]]:
             # target is covered, reset emergency mode
             # logging.debug("my_emergency_index: {}".format(my_emergency_index[i]))
-            my_emergency_mode[i] = 0
-            my_emergency_target[i] = -1
-            my_emergency_index[i] = -1
+            if len(my_queue) == 0:
+                my_emergency_mode[i] = 0
+                my_emergency_target[i] = -1
+                my_emergency_index[i] = -1
+            else:
+                my_emergency_index[i] = my_queue.popleft()
+                my_emergency_target[i] = emergency_xy[my_emergency_index[i]]
     last_round_emergency = my_emergency_mode & last_round_emergency
 
     for i, this_coverage in enumerate(target_coverage):
