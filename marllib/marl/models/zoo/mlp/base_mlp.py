@@ -54,6 +54,14 @@ def generate_identity_matrices(n, m):
     return result
 
 
+def generate_agent_matrix(num_of_agents, num_of_tasks):
+    matrix = np.zeros((num_of_agents, num_of_agents * num_of_tasks), dtype=int)
+    col_indices = np.arange(0, num_of_agents * num_of_tasks)
+    row_indices = np.repeat(np.arange(0, num_of_agents), repeats=num_of_tasks)
+    # Use NumPy broadcasting to set the values efficiently
+    matrix[row_indices, col_indices] = 1
+    return matrix
+
 def argmax_to_mask(argmax_indices, num_classes=4, num_coords=2):
     # Create a mask tensor filled with zeros
     mask = torch.zeros((len(argmax_indices), num_coords * (num_classes - 1)), dtype=torch.float32)
@@ -293,6 +301,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_threshold = self.model_arch_args['emergency_threshold']
         self.dataset_name = self.model_arch_args['dataset']
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
+        self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
         emergency_path_name = os.path.join(get_project_root(), 'datasets',
                                            self.dataset_name, 'emergency_time_loc_0900_0930.csv')
         if os.path.exists(emergency_path_name):
@@ -497,7 +506,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 target_coverage,
                                 self.status_dim,
                                 self.emergency_feature_dim,
-                                self.n_agents
+                                self.n_agents,
+                                self.emergency_queue_length
                             )
                         )
                         logging.debug("actual emergency indices: {}".format(actual_emergency_indices))
@@ -520,26 +530,40 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 selected_emergencies = np.full(len(allocation_agents), -1, dtype=np.int32)
                                 if self.one_agent_multi_task:
                                     flatten_costs = np.split(outputs, env_stop_index)
-                                    for flatten_cost, num_of_agents, cur_index in (
-                                            zip(flatten_costs, agent_nums, [0] + agent_stop_index.tolist())):
+                                    for flatten_cost, num_of_agents, cur_index, actual_agents in (
+                                            zip(flatten_costs, agent_nums, [0] + agent_stop_index.tolist(),
+                                                np.split(allocation_agents, agent_stop_index))):
                                         num_of_tasks = len(flatten_cost) // num_of_agents
                                         logging.debug(f"num_of_agents: {num_of_agents}, num_of_tasks: {num_of_tasks}")
-                                        lb = ub = np.ones(num_of_tasks)
+                                        # Constraint 1: each task should be assigned to 1 agent.
+                                        ub = np.ones(num_of_tasks)
+                                        lb = np.ones(num_of_tasks)
                                         constraint_mat = generate_identity_matrices(num_of_agents, num_of_tasks)
                                         task_constraint = LinearConstraint(constraint_mat, lb, ub)
+                                        # Constraint 2: each agent can have 1~5 tasks
+                                        # ub = np.zeros(num_of_agents)
+                                        # for j in range(num_of_agents):
+                                        #     ub[j] = (self.emergency_queue_length -
+                                        #              len(self.emergency_queue[j + cur_index]) +
+                                        #              ~self.emergency_mode[j + cur_index])
+                                        # logging.debug("Agent Capacity: {}".format(ub))
+                                        # lb = np.ones(num_of_agents)
+                                        # constraint_mat = generate_agent_matrix(num_of_agents, num_of_tasks)
+                                        # agent_constraint = LinearConstraint(constraint_mat, lb, ub)
                                         integrality = np.ones(num_of_agents * num_of_tasks)
                                         bounds = Bounds(0, 1)
                                         result = milp(flatten_cost, integrality=integrality, bounds=bounds,
-                                                      constraints=task_constraint)
+                                                      constraints=[task_constraint])
                                         if result['success']:
+                                            logging.debug("Success to solve the optimization problem")
                                             allocate_result = result['x'].reshape(num_of_agents, num_of_tasks).astype(
                                                 int)
-                                            first_to_assign, remain_to_assign = separate_first_task(
-                                                np.nonzero(allocate_result))
+                                            first_to_assign, remain_to_assign = (
+                                                separate_first_task(np.nonzero(allocate_result)))
                                             row_ind, col_ind = first_to_assign
                                             selected_emergencies[cur_index + row_ind] = col_ind
                                             for agent_id, emergency_id in zip(*remain_to_assign):
-                                                self.emergency_queue[agent_id].append(
+                                                self.emergency_queue[actual_agents[agent_id]].append(
                                                     actual_emergency_indices[emergency_id])
                                         else:
                                             logging.debug("Failed to solve the optimization problem, "
@@ -581,7 +605,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 input_dict['obs']['obs']['agents_state'] = all_obs
             logging.debug(f"Mode after obs: {self.emergency_mode[:self.n_agents]}")
             logging.debug(f"Agent Emergency Indices: {self.emergency_indices[:16]}")
-            logging.debug(f"Emergency Queue Length: {[len(q) for q in self.emergency_queue[:self.n_agents]]}")
+            logging.debug(f"Emergency Queue Length: {[len(q) for q in self.emergency_queue[:16]]}")
             if self.render:
                 self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents]
                 self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents]
@@ -711,7 +735,8 @@ def construct_query_batch(
         target_coverage: np.ndarray,
         status_dim: int,
         emergency_feature_dim: int,
-        n_agents: int
+        n_agents: int,
+        max_queue_length: int,
 ):
     """
     set emergency_mode according to coverage status and return a new batch of emergency mode status
@@ -738,7 +763,10 @@ def construct_query_batch(
                 my_emergency_target[i] = -1
                 my_emergency_index[i] = -1
             else:
-                my_emergency_index[i] = my_queue.popleft()
+                new_emergency = my_queue.popleft()
+                while this_coverage[new_emergency] and len(my_queue) > 0:
+                    new_emergency = my_queue.popleft()
+                my_emergency_index[i] = new_emergency
                 logging.debug(f"Selecting from queue: {my_emergency_index[i]}")
                 my_emergency_target[i] = emergency_xy[my_emergency_index[i]]
                 logging.debug(f"Emergency target ({my_emergency_target[i][0]},{my_emergency_target[i][1]}) "
