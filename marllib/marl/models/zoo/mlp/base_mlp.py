@@ -532,7 +532,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                     selected_emergencies = np.full(len(allocation_agents), -1, dtype=np.int32)
                                     for matrix, cur_index in zip(all_cost_matrix, [0] + agent_stop_index.tolist()):
                                         row_ind, col_ind = linear_sum_assignment(matrix)
-                                        logging.debug("Greedy Cost Function")
+                                        logging.debug("Cost Function")
                                         logging.debug(matrix)
                                         selected_emergencies[cur_index + row_ind] = col_ind
                             else:
