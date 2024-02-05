@@ -593,12 +593,12 @@ def kl_and_loss_stats_with_regress(policy: Policy,
     for item in ['regress_loss']:
         original_dict[item] = torch.mean(torch.stack(policy.get_tower_stats("mean_" + item)))
     for model in policy.model_gpu_towers:
-
         if model.last_emergency_mode is not None:
             for i in range(model.n_agents):
                 original_dict[f'agent_{i}_mode'] = model.last_emergency_mode[i]
                 original_dict[f'agent_{i}_target_x'] = model.last_emergency_target[i][0]
                 original_dict[f'agent_{i}_target_y'] = model.last_emergency_target[i][1]
+                original_dict[f'agent_{i}_queue_length'] = model.last_emergency_queue_length[i]
         break
     return original_dict
 
