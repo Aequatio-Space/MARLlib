@@ -174,6 +174,13 @@ def relabel_for_sample_batch(
     # try, send relabeled trajectory only.
 
 
+def get_start_indices_of_segments(array):
+    array = np.array(array)
+    unique_pairs, inverse_indices = np.unique(array, axis=0, return_inverse=True)
+    # Get the start indices of each segment
+    start_indices = sorted([np.where(inverse_indices == i)[0][0] for i in range(len(unique_pairs))])
+    return start_indices
+
 def label_done_masks_and_calculate_gae_for_sample_batch(
         policy: TorchPolicy,
         sample_batch: SampleBatch,
@@ -181,22 +188,22 @@ def label_done_masks_and_calculate_gae_for_sample_batch(
         episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
     status_dim = policy.model.status_dim
     emergency_dim = policy.model.emergency_feature_dim
+
+    # check whether numbers between status_dim:status_dim + emergency_dim are all zeros, one row per value
+    emergency_obs = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+    no_emergency_mask = np.nansum(np.abs(emergency_obs), axis=1) == 0
+    emergencies_masks = []
     separate_batches = []
     last_index = 0
-    # check whether numbers between status_dim:status_dim + emergency_dim are all zeros, one row per value
-    no_emergency_mask = np.nansum(np.abs(sample_batch[SampleBatch.OBS][...,
-                                         status_dim:status_dim + emergency_dim]), axis=1) == 0
-    emergencies_masks = []
     try:
         raw_rewards = sample_batch['original_rewards']
     except KeyError:
         raw_rewards = sample_batch[SampleBatch.REWARDS]
-    for index, reward in enumerate(raw_rewards):
-        if reward >= EMERGENCY_REWARD_INCREMENT:
-            # sample_batch[SampleBatch.DONES][index] = True
-            separate_batches.append(sample_batch[last_index:index + 1].copy())
-            emergencies_masks.append(no_emergency_mask[last_index:index + 1])
-            last_index = index + 1
+    separate_result = get_start_indices_of_segments(emergency_obs)
+    for index in separate_result[1:]:
+        separate_batches.append(sample_batch[last_index:index + 1].copy())
+        emergencies_masks.append(no_emergency_mask[last_index:index + 1])
+        last_index = index + 1
     if len(separate_batches) == 0:
         sample_batch['labels'] = np.where(no_emergency_mask, 1, -1)
         return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
@@ -209,7 +216,7 @@ def label_done_masks_and_calculate_gae_for_sample_batch(
         batch_length = len(batch[SampleBatch.REWARDS])
         if i != length - 1:
             labels = np.arange(start=batch_length, stop=0, step=-1) / episode_length
-            batch['labels'] = labels
+            batch['labels'] = np.where(mask, labels, -1)
         else:
             batch['labels'] = np.full(batch_length,
                                       -1)  # discard last batch by default since it contains truncated result.
