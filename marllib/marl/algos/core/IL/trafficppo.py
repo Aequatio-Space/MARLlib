@@ -561,17 +561,6 @@ def increasing_intrinsic_relabeling(model, train_batch, virtual_obs):
     return mean_relabel_percentage, predictor_inputs, predictor_labels, relabel_targets, train_batch_device
 
 
-def extra_action_out_fn_old(policy, input_dict, state_batches, model, action_dist):
-    """Attach virtual obs to sample batch for Intrinsic reward calculation."""
-    extra_dict = vf_preds_fetches(policy, input_dict, state_batches, model, action_dist)
-    try:
-        extra_dict['virtual_obs'] = model.last_virtual_obs
-        # extra_dict['predicted_values'] = model.last_predicted_values
-    except AttributeError:
-        pass
-    return extra_dict
-
-
 def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
     """Attach virtual obs to sample batch for Intrinsic reward calculation."""
     extra_dict = vf_preds_fetches(policy, input_dict, state_batches, model, action_dist)

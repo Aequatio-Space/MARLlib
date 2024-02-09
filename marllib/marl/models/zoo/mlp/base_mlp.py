@@ -5,7 +5,7 @@ import random
 import pprint
 import heapq
 from typing import Tuple
-
+from torch.distributions import Categorical
 import pandas as pd
 from numba import njit
 from collections import deque
@@ -39,6 +39,7 @@ from ray.rllib.models.torch.misc import SlimFC, SlimConv2d, normc_initializer
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.typing import Dict, TensorType, List
+from ray.rllib.policy.sample_batch import SampleBatch
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
 from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
 
@@ -121,6 +122,38 @@ class Predictor(nn.Module):
         return self.fc(x)
 
 
+class AgentSelector(nn.Module):
+    def __init__(self, input_dim, hidden_size, num_agents):
+        super().__init__()
+        self.num_agents = num_agents
+        self.input_dim = input_dim
+        self.activation = nn.ReLU
+        self.fc = nn.Sequential(
+            SlimFC(
+                in_size=input_dim,
+                out_size=hidden_size,
+                initializer=normc_initializer(0.01),
+                activation_fn=self.activation),
+            SlimFC(
+                in_size=hidden_size,
+                out_size=hidden_size,
+                initializer=normc_initializer(0.01),
+                activation_fn=self.activation),
+            SlimFC(
+                in_size=hidden_size,
+                out_size=num_agents,
+                initializer=normc_initializer(0.01),
+                activation_fn=None),
+        )
+        # softmax layer
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, input_obs):
+        probs = self.softmax(self.fc(input_obs))
+        # return action distribution
+        return Categorical(probs)
+
+
 class RandomSelector(nn.Module):
     def __init__(self, num_agents, num_actions):
         super().__init__()
@@ -143,6 +176,18 @@ class GreedySelector(nn.Module):
         distances = torch.norm(agent_positions - target_positions, dim=1)
         return distances
 
+
+class GreedyAgentSelector(nn.Module):
+    def __init__(self, input_dim, num_agents):
+        super().__init__()
+        self.num_agents = num_agents
+        self.input_dim = input_dim
+
+    def forward(self, input_obs):
+        agent_positions = input_obs[:, :-2].reshape(-1, self.num_agents, 3)[..., :2]
+        target_positions = input_obs[:, -2:].repeat(self.num_agents, 1).reshape(-1, self.num_agents, 2)
+        distances = torch.norm(agent_positions - target_positions, dim=-1)
+        return Categorical(probs=torch.nn.functional.one_hot(torch.argmin(distances, dim=-1), self.num_agents))
 
 class BaseMLPMixin:
 
@@ -281,7 +326,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         BaseMLPMixin.__init__(self)
 
         # decide the model arch
-
+        self.assignment_sample_batches = []
         self.inputs = None
         self.custom_config = model_config["custom_model_config"]
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
@@ -329,7 +374,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_mode = self.emergency_target = self.emergency_queue = self.emergency_indices = None
         self.with_programming_optimization = self.model_arch_args['with_programming_optimization']
         self.one_agent_multi_task = self.model_arch_args['one_agent_multi_task']
-        self.last_emergency_selection = None
+        self.last_emergency_selection = self.last_emergency_indices = None
         self.reset_states()
         self.last_emergency_queue_length = self.last_emergency_mode = self.last_emergency_targets = None
         # encoder
@@ -373,7 +418,13 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         elif self.selector_type == 'random':
             self.selector = RandomSelector(self.n_agents, num_outputs)
         elif self.selector_type == 'NN':
-            self.selector = Predictor(self.full_obs_space['obs']['agents_state'].shape[0]).to(self.device)
+            input_dim = self.full_obs_space['obs']['agents_state'].shape[0]
+            self.selector = Predictor(input_dim).to(self.device)
+        elif self.selector_type == 'RL':
+            # self.selector = AgentSelector(self.n_agents * 3 + 2, 64, self.n_agents).to(
+            #     self.device)
+            self.selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
+                self.device)
         # Note, the final activation cannot be tanh, check.
         if self.render:
             # self.wait_time_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
@@ -390,7 +441,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
         self.emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
         self.emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
-        self.emergency_queue = [[] for _ in range(self.n_agents * self.num_envs)]
+        self.emergency_queue = [deque() for _ in range(self.n_agents * self.num_envs)]
         # same mode, indices, target with "mock" for testing
         # self.mock_emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
         # self.mock_emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
@@ -504,6 +555,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         self.oracle_assignment(all_obs, emergency_xy, target_coverage,
                                                self.emergency_mode, self.emergency_target,
                                                self.emergency_indices)
+                    elif self.selector_type == 'RL':
+                        self.rl_assignment(all_obs, emergency_xy, target_coverage,
+                                           self.emergency_queue, self.n_agents)
                     else:
                         # old_reference = self.oracle_assignment(all_obs.clone().detach(), emergency_xy, target_coverage,
                         #                        self.mock_emergency_mode, self.mock_emergency_target,
@@ -571,7 +625,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                                                                 np.where(target_index == first_id))
                                                 for emergency_index in target_to_queue:
                                                     if len(my_queue) < self.emergency_queue_length:
-                                                        heapq.heappush(my_queue,
+                                                        my_queue.append(
                                                                        (actual_emergency_indices[emergency_index]))
                                                     else:
                                                         break
@@ -677,21 +731,47 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 logging.debug("Failed to solve the optimization problem, "
                               "No allocation is made")
 
-    def rl_assignment(self, all_obs, emergency_xy, target_coverage, my_emergency_mode,
-                      my_emergency_target, my_emergency_indices, my_emergency_queue, n_agents):
+    def rl_assignment(self, all_obs, emergency_xy, target_coverage, my_emergency_queue, n_agents):
         all_env_obs = all_obs.reshape(-1, self.n_agents, 22)
+        assign_states, assign_actions, assign_rewards = [], [], []
         for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs,
                                                          target_coverage[::n_agents])):
-            covered_emergency = emergency_xy[this_coverage == 1]
+            covered_emergency = this_coverage == 1
+            offset = i * self.n_agents
+            for j in range(self.n_agents):
+                actual_agent_id = offset + j
+                my_queue = my_emergency_queue[actual_agent_id]
+                while len(my_queue) > 0 and covered_emergency[my_queue[0]]:
+                    my_queue.popleft()
 
-        for i(env_obs, this_coverage) in enumerate(zip(all_env_obs, target_coverage[::n_agents])):
+        for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs, target_coverage[::n_agents])):
             offset = i * self.n_agents
             valid_emergencies = this_coverage == 0
             # convert all queue entries in an env into a list
             env_queues = [list(q) for q in my_emergency_queue[offset:offset + n_agents]]
+            agents_pos = env_obs[:, n_agents + 2: n_agents + 4]
+            for i, my_queue in enumerate(env_queues):
+                if len(my_queue) > 0:
+                    agents_pos[i] = torch.from_numpy(emergency_xy[my_queue[-1]])
+            agents_queue_len = torch.tensor([len(q) for q in env_queues]).unsqueeze(-1).to(self.device)
             # unwrap list of list, remove emergencies in agents queue.
             additional_emergencies = [item for sublist in env_queues for item in sublist]
             valid_emergencies[additional_emergencies] = False
+            emergencies = emergency_xy[valid_emergencies]
+            received_tasks = len(emergencies)
+            if received_tasks > 0:
+                selector_obs = torch.cat([agents_pos, agents_queue_len], dim=1).flatten().repeat(received_tasks, 1)
+                final_obs = torch.cat([selector_obs, torch.from_numpy(emergencies).to(self.device)], dim=1)
+                action_dists: Categorical = self.selector(final_obs)
+                actions = action_dists.sample().cpu().numpy()
+                agent_ids = offset + actions
+                for agent_id, index in zip(agent_ids, np.nonzero(valid_emergencies)[0]):
+                    my_emergency_queue[agent_id].append(index)
+
+        for i, emergency_queue in enumerate(my_emergency_queue):
+            if len(emergency_queue) > 0:
+                all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \
+                    torch.from_numpy(emergency_xy[emergency_queue[0]])
 
     def oracle_assignment(self, all_obs, emergency_xy, target_coverage,
                           emergency_mode, emergency_target, emergency_indices):
@@ -812,7 +892,7 @@ def construct_query_batch(
     last_round_emergency = my_emergency_mode.copy()
     start_index = 0
     for i, this_coverage in enumerate(target_coverage):
-        my_queue: list = my_emergency_queue[i]
+        my_queue: deque = my_emergency_queue[i]
         #     # logging.debug(f"index: {i}")
         if my_emergency_mode[i] and this_coverage[my_emergency_index[i]]:
             # target is covered, reset emergency mode
@@ -822,9 +902,9 @@ def construct_query_batch(
                 my_emergency_target[i] = -1
                 my_emergency_index[i] = -1
             else:
-                new_emergency = heapq.heappop(my_queue)[1]
+                new_emergency = my_queue.popleft()
                 while this_coverage[new_emergency] and len(my_queue) > 0:
-                    new_emergency = heapq.heappop(my_queue)[1]
+                    new_emergency = my_queue.popleft()
                 my_emergency_index[i] = new_emergency
                 logging.debug(f"Selecting from queue: {my_emergency_index[i]}")
                 my_emergency_target[i] = emergency_xy[my_emergency_index[i]]
@@ -833,7 +913,7 @@ def construct_query_batch(
     last_round_emergency = my_emergency_mode & last_round_emergency
 
     for i, this_coverage in enumerate(target_coverage):
-        my_queue: list = my_emergency_queue[i]
+        my_queue: deque = my_emergency_queue[i]
         if len(my_queue) < max_queue_length:
             env_num = i // n_agents
             offset = env_num * n_agents
