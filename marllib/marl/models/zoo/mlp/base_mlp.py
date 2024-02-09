@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import pprint
+import heapq
 from typing import Tuple
 
 import pandas as pd
@@ -389,7 +390,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
         self.emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
         self.emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
-        self.emergency_queue = [deque(maxlen=self.emergency_queue_length) for _ in range(self.n_agents * self.num_envs)]
+        self.emergency_queue = [[] for _ in range(self.n_agents * self.num_envs)]
         # same mode, indices, target with "mock" for testing
         # self.mock_emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
         # self.mock_emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
@@ -570,7 +571,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                                                                 np.where(target_index == first_id))
                                                 for emergency_index in target_to_queue:
                                                     if len(my_queue) < self.emergency_queue_length:
-                                                        my_queue.append(actual_emergency_indices[emergency_index])
+                                                        heapq.heappush(my_queue,
+                                                                       (actual_emergency_indices[emergency_index]))
                                                     else:
                                                         break
                                 else:
@@ -674,6 +676,22 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             else:
                 logging.debug("Failed to solve the optimization problem, "
                               "No allocation is made")
+
+    def rl_assignment(self, all_obs, emergency_xy, target_coverage, my_emergency_mode,
+                      my_emergency_target, my_emergency_indices, my_emergency_queue, n_agents):
+        all_env_obs = all_obs.reshape(-1, self.n_agents, 22)
+        for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs,
+                                                         target_coverage[::n_agents])):
+            covered_emergency = emergency_xy[this_coverage == 1]
+
+        for i(env_obs, this_coverage) in enumerate(zip(all_env_obs, target_coverage[::n_agents])):
+            offset = i * self.n_agents
+            valid_emergencies = this_coverage == 0
+            # convert all queue entries in an env into a list
+            env_queues = [list(q) for q in my_emergency_queue[offset:offset + n_agents]]
+            # unwrap list of list, remove emergencies in agents queue.
+            additional_emergencies = [item for sublist in env_queues for item in sublist]
+            valid_emergencies[additional_emergencies] = False
 
     def oracle_assignment(self, all_obs, emergency_xy, target_coverage,
                           emergency_mode, emergency_target, emergency_indices):
@@ -794,7 +812,7 @@ def construct_query_batch(
     last_round_emergency = my_emergency_mode.copy()
     start_index = 0
     for i, this_coverage in enumerate(target_coverage):
-        my_queue: deque = my_emergency_queue[i]
+        my_queue: list = my_emergency_queue[i]
         #     # logging.debug(f"index: {i}")
         if my_emergency_mode[i] and this_coverage[my_emergency_index[i]]:
             # target is covered, reset emergency mode
@@ -804,9 +822,9 @@ def construct_query_batch(
                 my_emergency_target[i] = -1
                 my_emergency_index[i] = -1
             else:
-                new_emergency = my_queue.popleft()
+                new_emergency = heapq.heappop(my_queue)[1]
                 while this_coverage[new_emergency] and len(my_queue) > 0:
-                    new_emergency = my_queue.popleft()
+                    new_emergency = heapq.heappop(my_queue)[1]
                 my_emergency_index[i] = new_emergency
                 logging.debug(f"Selecting from queue: {my_emergency_index[i]}")
                 my_emergency_target[i] = emergency_xy[my_emergency_index[i]]
@@ -815,12 +833,12 @@ def construct_query_batch(
     last_round_emergency = my_emergency_mode & last_round_emergency
 
     for i, this_coverage in enumerate(target_coverage):
-        my_queue: deque = my_emergency_queue[i]
+        my_queue: list = my_emergency_queue[i]
         if len(my_queue) < max_queue_length:
             env_num = i // n_agents
             offset = env_num * n_agents
             valid_emergencies = this_coverage == 0
-            # convert all queue entries in a env into a list
+            # convert all queue entries in an env into a list
             env_queues = [list(q) for q in my_emergency_queue[offset:offset + n_agents]]
             # unwrap list of list, remove emergencies in agents queue.
             additional_emergencies = [item for sublist in env_queues for item in sublist]
