@@ -11,6 +11,8 @@ import logging
 from typing import Dict, List, Type, Union, Optional
 from copy import deepcopy
 import numpy as np
+from ray.rllib.evaluation.postprocessing import discount_cumsum
+from torch.distributions import Categorical
 from tqdm import tqdm
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from ray.rllib.agents.ppo import PPOTorchPolicy, DEFAULT_CONFIG as PPO_CONFIG
@@ -260,7 +262,7 @@ def mapping_relabeling(extra_batches, start_timestep, num_agents, sample_batch, 
     emergency_features = emergency_dim = policy.model.emergency_feature_dim
     for i in range(len(extra_batches)):
         original_batch = extra_batches[i]
-        obs_shape = original_batch[SampleBatch.OBS].shape
+        # obs_shape = original_batch[SampleBatch.OBS].shape
         agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 2 + 2]
         goals_to_be_filled = agents_position[start_timestep:, :]
         # sample an ascending sequence of with length goal_number
@@ -315,7 +317,7 @@ def future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_
 
 
 def compute_gae_and_intrinsic_for_sample_batch(
-        policy: Policy,
+        policy: TorchPolicy,
         sample_batch: SampleBatch,
         other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
         episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
@@ -422,9 +424,10 @@ def match_aoi(all_emergencies_position: np.ndarray,
 
 
 def add_regress_loss(
-        policy: Policy, model: ModelV2,
+        policy: TorchPolicy, model: ModelV2,
         dist_class: Type[TorchDistributionWrapper],
         train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
+    logging.debug("add_regress_loss is called")
     status_dim = policy.model.status_dim
     emergency_dim = policy.model.emergency_feature_dim
     if hasattr(model, "selector_type") and model.selector_type == 'NN':
@@ -469,6 +472,40 @@ def add_regress_loss(
     else:
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
+    if hasattr(model, "selector_type") and model.selector_type == 'RL':
+        rl_optimizer = optim.Adam(model.selector.parameters(), lr=0.001)
+        model.selector.train()
+        full_batches = []
+        if model.last_rl_transitions is not None:
+            for transitions in model.last_rl_transitions:
+                if len(transitions) > 0:
+                    full_batches.extend(SampleBatch.split_by_episode(SampleBatch.concat_samples(transitions)))
+        mean_loss = torch.tensor(0.0)
+        device = model.device
+        progress = tqdm(full_batches)
+        for batch in progress:
+            discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0.99)
+            # normalize rewards
+            discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
+                    discounted_rewards.std() + 1e-8)
+
+            discounted_rewards = torch.from_numpy(discounted_rewards.copy()).to(device)
+            inputs = torch.from_numpy(batch[SampleBatch.CUR_OBS]).to(device)
+            batch_dist: Categorical = Categorical(probs=model.selector(inputs))
+            actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
+            log_probs = -batch_dist.log_prob(actions_tensor)
+            loss = torch.mean(log_probs * discounted_rewards)
+            mean_loss += loss.detach()
+            progress.set_postfix({'loss': loss.item()})
+            rl_optimizer.zero_grad()
+            loss.backward()
+            rl_optimizer.step()
+        if len(full_batches) > 0:
+            mean_loss /= len(full_batches)
+        model.selector.eval()
+        model.last_rl_transitions = [[] for _ in range(model.num_envs)]
+        logging.debug(f"RL Mean Loss: {mean_loss.item()}")
+    model.tower_stats['mean_pg_loss'] = mean_loss
     model.train()
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
     model.eval()
@@ -572,7 +609,7 @@ def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
     return extra_dict
 
 
-def kl_and_loss_stats_with_regress(policy: Policy,
+def kl_and_loss_stats_with_regress(policy: TorchPolicy,
                                    train_batch: SampleBatch) -> Dict[str, TensorType]:
     """
     Add regress loss stats to the original stats.
