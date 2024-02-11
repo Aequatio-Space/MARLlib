@@ -480,8 +480,9 @@ def add_regress_loss(
             for transitions in model.last_rl_transitions:
                 if len(transitions) > 0:
                     full_batches.extend(SampleBatch.split_by_episode(SampleBatch.concat_samples(transitions)))
-        mean_loss = torch.tensor(0.0)
+
         device = model.device
+        mean_loss = torch.tensor(0.0).to(device)
         progress = tqdm(full_batches)
         for batch in progress:
             discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0.99)
@@ -494,11 +495,11 @@ def add_regress_loss(
             batch_dist: Categorical = Categorical(probs=model.selector(inputs))
             actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
             log_probs = -batch_dist.log_prob(actions_tensor)
-            loss = torch.mean(log_probs * discounted_rewards)
-            mean_loss += loss.detach()
+            loss = torch.mean(log_probs * discounted_rewards).to(device)
             progress.set_postfix({'loss': loss.item()})
             rl_optimizer.zero_grad()
             loss.backward()
+            mean_loss += loss.detach()
             rl_optimizer.step()
         if len(full_batches) > 0:
             mean_loss /= len(full_batches)
@@ -616,7 +617,7 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
     """
     original_dict = kl_and_loss_stats(policy, train_batch)
     #  'label_count', 'valid_fragment_length', 'relabel_percentage'
-    for item in ['regress_loss']:
+    for item in ['regress_loss', 'pg_loss']:
         original_dict[item] = torch.mean(torch.stack(policy.get_tower_stats("mean_" + item)))
     for model in policy.model_gpu_towers:
         if model.last_emergency_mode is not None:
