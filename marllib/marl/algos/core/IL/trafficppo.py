@@ -435,7 +435,7 @@ def add_regress_loss(
         learning_rate = 0.001 if model.render is False else 0
         epochs = 1
         criterion = nn.MSELoss()
-        optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+        optimizer = optim.Adam(model.selector.parameters(), lr=learning_rate)
         try:
             train_batch[SampleBatch.OBS][..., :status_dim + emergency_dim] = train_batch[VIRTUAL_OBS]
         except KeyError:
@@ -473,37 +473,39 @@ def add_regress_loss(
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
     if hasattr(model, "selector_type") and model.selector_type == 'RL':
-        rl_optimizer = optim.Adam(model.selector.parameters(), lr=0.001)
-        model.selector.train()
-        full_batches = []
-        if model.last_rl_transitions is not None:
-            for transitions in model.last_rl_transitions:
-                if len(transitions) > 0:
-                    full_batches.extend(SampleBatch.split_by_episode(SampleBatch.concat_samples(transitions)))
+        parameters_list = [item for item in model.selector.parameters()]
+        if len(parameters_list) > 0:
+            rl_optimizer = optim.Adam(parameters_list, lr=0.001)
+            model.selector.train()
+            full_batches = []
+            if model.last_rl_transitions is not None:
+                for transitions in model.last_rl_transitions:
+                    if len(transitions) > 0:
+                        full_batches.extend(SampleBatch.split_by_episode(SampleBatch.concat_samples(transitions)))
 
-        device = model.device
-        mean_loss = torch.tensor(0.0).to(device)
-        progress = tqdm(full_batches)
-        for batch in progress:
-            discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0.99)
-            # normalize rewards
-            discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
-                    discounted_rewards.std() + 1e-8)
+            device = model.device
+            mean_loss = torch.tensor(0.0).to(device)
+            progress = tqdm(full_batches)
+            for batch in progress:
+                discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0.99)
+                # normalize rewards
+                discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
+                        discounted_rewards.std() + 1e-8)
 
-            discounted_rewards = torch.from_numpy(discounted_rewards.copy()).to(device)
-            inputs = torch.from_numpy(batch[SampleBatch.CUR_OBS]).to(device)
-            batch_dist: Categorical = Categorical(probs=model.selector(inputs))
-            actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
-            log_probs = -batch_dist.log_prob(actions_tensor)
-            loss = torch.mean(log_probs * discounted_rewards).to(device)
-            progress.set_postfix({'loss': loss.item()})
-            rl_optimizer.zero_grad()
-            loss.backward()
-            mean_loss += loss.detach()
-            rl_optimizer.step()
-        if len(full_batches) > 0:
-            mean_loss /= len(full_batches)
-        model.selector.eval()
+                discounted_rewards = torch.from_numpy(discounted_rewards.copy()).to(device)
+                inputs = torch.from_numpy(batch[SampleBatch.CUR_OBS]).to(device)
+                batch_dist: Categorical = Categorical(probs=model.selector(inputs))
+                actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
+                log_probs = -batch_dist.log_prob(actions_tensor)
+                loss = torch.mean(log_probs * discounted_rewards).to(device)
+                progress.set_postfix({'loss': loss.item()})
+                rl_optimizer.zero_grad()
+                loss.backward()
+                mean_loss += loss.detach()
+                rl_optimizer.step()
+            if len(full_batches) > 0:
+                mean_loss /= len(full_batches)
+            model.selector.eval()
         model.last_rl_transitions = [[] for _ in range(model.num_envs)]
         logging.debug(f"RL Mean Loss: {mean_loss.item()}")
     model.tower_stats['mean_pg_loss'] = mean_loss

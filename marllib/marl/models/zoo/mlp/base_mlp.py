@@ -147,8 +147,10 @@ class AgentSelector(nn.Module):
         )
         # softmax layer
 
-    def forward(self, input_obs):
+    def forward(self, input_obs, invalid_mask=None):
         input_obs = self.fc(input_obs)
+        if invalid_mask is not None:
+            input_obs -= invalid_mask * 1e10
         action_scores = torch.nn.functional.softmax(input_obs, dim=1)
         return action_scores
 
@@ -182,11 +184,12 @@ class GreedyAgentSelector(nn.Module):
         self.num_agents = num_agents
         self.input_dim = input_dim
 
-    def forward(self, input_obs):
+    def forward(self, input_obs, invalid_mask):
         agent_positions = input_obs[:, :-2].reshape(-1, self.num_agents, 3)[..., :2]
         target_positions = input_obs[:, -2:].repeat(self.num_agents, 1).reshape(-1, self.num_agents, 2)
         distances = torch.norm(agent_positions - target_positions, dim=-1)
-        return Categorical(probs=torch.nn.functional.one_hot(torch.argmin(distances, dim=-1), self.num_agents))
+        distances[invalid_mask] = float('inf')
+        return torch.nn.functional.one_hot(torch.argmin(distances, dim=-1), self.num_agents)
 
 
 class RandomAgentSelector(nn.Module):
@@ -196,7 +199,7 @@ class RandomAgentSelector(nn.Module):
         self.input_dim = input_dim
 
     def forward(self, input_obs):
-        return Categorical(probs=torch.rand((input_obs.shape[0], self.num_agents)))
+        return torch.rand((input_obs.shape[0], self.num_agents))
 
 class BaseMLPMixin:
 
@@ -369,6 +372,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.tolerance = self.model_arch_args['tolerance']
         self.dataset_name = self.model_arch_args['dataset']
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
+        self.look_ahead = True
         # self.emergency_queue_length = 5
         self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
         emergency_path_name = os.path.join(get_project_root(), 'datasets',
@@ -434,7 +438,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 self.device)
             # self.selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
             #     self.device)
-            self.rl_optimizer = torch.optim.Adam(self.selector.parameters(), lr=1e-3)
             # self.selector = RandomAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
             #     self.device)
         # Note, the final activation cannot be tanh, check.
@@ -763,12 +766,16 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             # convert all queue entries in an env into a list
             env_queues = [list(q) for q in my_emergency_queue[offset:offset + n_agents]]
             agents_pos = env_obs[:, n_agents + 2: n_agents + 4]
-            # for j, my_queue in enumerate(env_queues):
-            #     if len(my_queue) > 0:
-            #         agents_pos[j] = torch.from_numpy(emergency_xy[my_queue[-1]])
+            if self.look_ahead:
+                for j, my_queue in enumerate(env_queues):
+                    if len(my_queue) > 0:
+                        agents_pos[j] = torch.from_numpy(emergency_xy[my_queue[-1]])
+                        logging.debug("Replace agent position with emergency position")
             agents_queue_len = torch.tensor([len(q) for q in env_queues]).unsqueeze(-1).to(self.device)
-            # if torch.all(agents_queue_len == self.emergency_queue_length):
-            #     continue
+            single_invalid_mask = agents_queue_len.squeeze(-1) >= self.emergency_queue_length
+            if torch.all(single_invalid_mask):
+                logging.debug("All agents are full, no assignment is made")
+                continue
             # unwrap list of list, remove emergencies in agents queue.
             additional_emergencies = [item for sublist in env_queues for item in sublist]
             logging.debug(f"Additional Emergencies to remove: {additional_emergencies}")
@@ -779,7 +786,11 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             if received_tasks > 0:
                 selector_obs = torch.cat([agents_pos, agents_queue_len], dim=1).flatten().repeat(received_tasks, 1)
                 final_obs = torch.cat([selector_obs, torch.from_numpy(emergencies).to(self.device)], dim=1)
-                action_dists: Categorical = Categorical(probs=self.selector(final_obs))
+                # agents allocated in the same round can not be excluded.
+                invalid_mask = single_invalid_mask.repeat(received_tasks, 1)
+                probs = self.selector(final_obs, invalid_mask)
+                logging.debug("Probs: {}".format(probs))
+                action_dists: Categorical = Categorical(probs=probs)
                 actions = action_dists.sample().cpu().numpy()
                 reward = -np.linalg.norm(agents_pos[actions].cpu().numpy() - emergencies, axis=1)
                 self.last_rl_transitions[i].append(
@@ -799,8 +810,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 for agent_id, index in zip(agent_ids, actual_emergency_indices):
                     current_queue = my_emergency_queue[agent_id]
                     logging.debug(f"Agent {agent_id} is assigned to Emergency {index}")
-                    # if len(current_queue) < self.emergency_queue_length:
-                    current_queue.append(index)
+                    if len(current_queue) < self.emergency_queue_length:
+                        current_queue.append(index)
                     # logging.debug("Assignment Successful")
 
         for i, emergency_queue in enumerate(my_emergency_queue):
