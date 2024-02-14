@@ -535,21 +535,23 @@ def add_regress_loss(
             model.selector.train()
             full_batches = []
             if model.last_rl_transitions is not None:
-                for transitions in model.last_rl_transitions:
+                for transitions in model.last_rl_transitions[model.train_count * 10:(model.train_count + 1) * 10]:
                     if len(transitions) > 0:
                         full_batches.append(SampleBatch.concat_samples(transitions))
             if len(full_batches) > 0:
                 # update assignment rl trajectory with lower level agent trajectories
                 lower_agent_batches = train_batch.split_by_episode()
                 episode_length = policy.model.episode_length
+                print("Number of batches: ", len(lower_agent_batches))
                 for i, lower_agent_batch in enumerate(lower_agent_batches):
                     assign_rewards = full_batches[i][SampleBatch.REWARDS]
                     try:
-                        execute_rewards = lower_agent_batch['original_rewards']
+                        execute_rewards = lower_agent_batch['original_rewards'].cpu().numpy()
                     except KeyError:
-                        execute_rewards = lower_agent_batch[SampleBatch.REWARDS]
+                        execute_rewards = lower_agent_batch[SampleBatch.REWARDS].cpu().numpy()
                     allocation_list = full_batches[i][SampleBatch.OBS][..., -2:]
-                    emergency_obs = lower_agent_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+                    emergency_obs = lower_agent_batch[SampleBatch.OBS][...,
+                                    status_dim:status_dim + emergency_dim].cpu().numpy()
                     separate_results = np.where(np.any(np.diff(emergency_obs, axis=0) != 0, axis=1))[0] + 1
                     # Determine start and end indices
                     start_indices, end_indices = [], []
@@ -621,7 +623,13 @@ def add_regress_loss(
                     rl_optimizer.step()
                     mean_loss /= len(full_batches)
                 model.selector.eval()
-        model.last_rl_transitions = [[] for _ in range(model.num_envs)]
+        if model.train_count == model.rl_update_interval - 1:
+            model.train_count = 0
+            model.last_rl_transitions = [[] for _ in range(model.num_envs)]
+        else:
+            if not torch.all(train_batch[SampleBatch.REWARDS] == 0):
+                model.train_count += 1
+        logging.debug(f"train function is called {model.train_count} times")
         logging.debug(f"RL Mean Loss: {mean_loss.item()}")
     model.tower_stats['mean_pg_loss'] = mean_loss
     model.train()

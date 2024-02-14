@@ -372,6 +372,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.tolerance = self.model_arch_args['tolerance']
         self.dataset_name = self.model_arch_args['dataset']
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
+        self.rl_update_interval = max(1, self.num_envs // 10)
+        self.train_count = 0
         self.look_ahead = True
         # self.emergency_queue_length = 5
         self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
@@ -387,7 +389,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_mode = self.emergency_target = self.emergency_queue = self.emergency_indices = None
         self.with_programming_optimization = self.model_arch_args['with_programming_optimization']
         self.one_agent_multi_task = self.model_arch_args['one_agent_multi_task']
-        self.last_emergency_selection = self.last_emergency_indices = self.last_rl_transitions = None
+        self.last_emergency_selection = self.last_emergency_indices = None
+        self.last_rl_transitions = [[] for _ in range(self.num_envs)]
         self.reset_states()
         self.last_emergency_queue_length = self.last_emergency_mode = self.last_emergency_targets = None
         # encoder
