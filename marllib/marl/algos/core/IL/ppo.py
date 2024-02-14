@@ -23,8 +23,9 @@
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from ray.rllib.agents.ppo.ppo_torch_policy import PPOTorchPolicy
 from ray.rllib.agents.ppo.ppo import DEFAULT_CONFIG as PPO_CONFIG
-from marllib.marl.algos.core.IL.trafficppo import (relabel_for_sample_batch, sample_batch_with_demonstration,
-                                                   add_regress_loss, save_sample_batch)
+
+# from marllib.marl.algos.core.IL.trafficppo import (relabel_for_sample_batch, sample_batch_with_demonstration,
+#                                                    add_regress_loss, save_sample_batch)
 ###########
 ### PPO ###
 ###########

@@ -6,12 +6,15 @@ import os
 import pickle
 import random
 import re
+
+import gym
 from numba import njit
 import logging
 from typing import Dict, List, Type, Union, Optional
 from copy import deepcopy
 import numpy as np
 from ray.rllib.evaluation.postprocessing import discount_cumsum
+from ray.rllib.policy.view_requirement import ViewRequirement
 from torch.distributions import Categorical
 from tqdm import tqdm
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
@@ -28,7 +31,9 @@ from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.typing import TensorType, TrainerConfigDict, AgentID
 from torch import optim
 
-EMERGENCY_REWARD_INCREMENT = 5.0
+ORIGINAL_REWARDS = 'original_rewards'
+
+EMERGENCY_REWARD_INCREMENT = 2.0
 
 torch, nn = try_import_torch()
 
@@ -99,7 +104,6 @@ def relabel_for_sample_batch(
     use_distance_intrinsic = selector_type != 'NN' or policy.model.step_count < policy.model.switch_step
     # logging.debug("use_distance_intrinsic: %s", use_distance_intrinsic)
     # logging.debug("step_count: %d, switch_step: %d", policy.model.step_count, policy.model.switch_step)
-    this_emergency_count = policy.model.emergency_count
     status_dim = policy.model.status_dim
     emergency_dim = policy.model.emergency_feature_dim
     # postprocess of rewards
@@ -112,6 +116,7 @@ def relabel_for_sample_batch(
         pass
     extra_batches = [sample_batch.copy() for _ in range(k)]
     future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch, policy)
+    this_emergency_count = policy.model.emergency_count
     observation = sample_batch[SampleBatch.OBS]
     observation_dim = status_dim + emergency_dim + 100
     state_agents_dim = (num_agents + 4) * num_agents
@@ -137,7 +142,7 @@ def relabel_for_sample_batch(
             intrinsic = -agent_metric_estimations.cpu().numpy()
             intrinsic *= (mask * age_of_informations[np.arange(len(age_of_informations)), indices])
         # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
-        sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
+        sample_batch[ORIGINAL_REWARDS] = deepcopy(sample_batch[SampleBatch.REWARDS])
         sample_batch['intrinsic_rewards'] = intrinsic
         if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
             sample_batch[SampleBatch.REWARDS] += torch.from_numpy(intrinsic)
@@ -182,6 +187,57 @@ def get_start_indices_of_segments(array):
     # Get the start indices of each segment
     start_indices = sorted([np.where(inverse_indices == i)[0][0] for i in range(len(unique_pairs))])
     return start_indices
+
+
+def label_rl_rewards_and_calculate_gae_for_sample_batch(
+        policy: TorchPolicy,
+        sample_batch: SampleBatch,
+        other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
+        episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
+    status_dim = policy.model.status_dim
+    emergency_dim = policy.model.emergency_feature_dim
+    # postprocess extra_batches
+    try:
+        virtual_obs = sample_batch[VIRTUAL_OBS]
+        sample_batch[SampleBatch.OBS][..., :status_dim + emergency_dim] = virtual_obs
+    except KeyError:
+        pass
+    # check whether numbers between status_dim:status_dim + emergency_dim are all zeros, one row per value
+    emergency_obs = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+    no_emergency_mask = np.nansum(np.abs(emergency_obs), axis=1) == 0
+    emergencies_masks = []
+    separate_batches = []
+    last_index = 0
+    try:
+        raw_rewards = sample_batch['original_rewards']
+    except KeyError:
+        raw_rewards = sample_batch[SampleBatch.REWARDS]
+    separate_result = get_start_indices_of_segments(emergency_obs)
+    for index in separate_result[1:]:
+        separate_batches.append(sample_batch[last_index:index + 1].copy())
+        emergencies_masks.append(no_emergency_mask[last_index:index + 1])
+        last_index = index + 1
+    if len(separate_batches) == 0:
+        sample_batch['labels'] = np.where(no_emergency_mask, 1, -1)
+        return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
+    if last_index < len(raw_rewards):
+        separate_batches.append(sample_batch[last_index:].copy())
+        emergencies_masks.append(no_emergency_mask[last_index:])
+    labeled_batches = []
+    length = len(separate_batches)
+    for i, (mask, batch) in enumerate(zip(emergencies_masks, separate_batches)):
+        batch_length = len(batch[SampleBatch.REWARDS])
+        if i != length - 1:
+            labels = np.arange(start=batch_length, stop=0, step=-1) / episode_length
+            batch['labels'] = np.where(mask, labels, -1)
+        else:
+            batch['labels'] = np.full(batch_length,
+                                      -1)  # discard last batch by default since it contains truncated result.
+        labeled_batches.append(batch)
+        # labeled_batches.append(compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode))
+    full_batch = SampleBatch.concat_samples(labeled_batches)
+    return compute_gae_for_sample_batch(policy, full_batch, other_agent_batches, episode)
+
 
 def label_done_masks_and_calculate_gae_for_sample_batch(
         policy: TorchPolicy,
@@ -481,31 +537,90 @@ def add_regress_loss(
             if model.last_rl_transitions is not None:
                 for transitions in model.last_rl_transitions:
                     if len(transitions) > 0:
-                        full_batches.extend(SampleBatch.split_by_episode(SampleBatch.concat_samples(transitions)))
-
-            device = model.device
-            mean_loss = torch.tensor(0.0).to(device)
-            progress = tqdm(full_batches)
-            for batch in progress:
-                discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0.99)
-                # normalize rewards
-                discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
-                        discounted_rewards.std() + 1e-8)
-
-                discounted_rewards = torch.from_numpy(discounted_rewards.copy()).to(device)
-                inputs = torch.from_numpy(batch[SampleBatch.CUR_OBS]).to(device)
-                batch_dist: Categorical = Categorical(probs=model.selector(inputs))
-                actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
-                log_probs = -batch_dist.log_prob(actions_tensor)
-                loss = torch.mean(log_probs * discounted_rewards).to(device)
-                progress.set_postfix({'loss': loss.item()})
-                rl_optimizer.zero_grad()
-                loss.backward()
-                mean_loss += loss.detach()
-                rl_optimizer.step()
+                        full_batches.append(SampleBatch.concat_samples(transitions))
             if len(full_batches) > 0:
-                mean_loss /= len(full_batches)
-            model.selector.eval()
+                # update assignment rl trajectory with lower level agent trajectories
+                lower_agent_batches = train_batch.split_by_episode()
+                episode_length = policy.model.episode_length
+                for i, lower_agent_batch in enumerate(lower_agent_batches):
+                    assign_rewards = full_batches[i][SampleBatch.REWARDS]
+                    try:
+                        execute_rewards = lower_agent_batch['original_rewards']
+                    except KeyError:
+                        execute_rewards = lower_agent_batch[SampleBatch.REWARDS]
+                    allocation_list = full_batches[i][SampleBatch.OBS][..., -2:]
+                    emergency_obs = lower_agent_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+                    separate_results = np.where(np.any(np.diff(emergency_obs, axis=0) != 0, axis=1))[0] + 1
+                    # Determine start and end indices
+                    start_indices, end_indices = [], []
+                    length = len(separate_results)
+                    j = 0
+                    while j < length:
+                        start_indices.append(separate_results[j])
+                        if j < length - 1:
+                            expected_end = separate_results[j + 1]
+                            end_indices.append(expected_end - 1)
+                            if not np.any(emergency_obs[expected_end]):
+                                j += 2
+                            else:
+                                j += 1
+                        else:
+                            end_indices.append(len(emergency_obs) - 1)
+                            j += 1
+                    # # add last start_indices if its emergency is not empty
+                    # if np.any(emergency_obs[-1]):
+                    #     start_indices.append(separate_results[-1])
+                    #     end_indices.append(len(emergency_obs) - 1)
+                    # test this function on different dataset
+                    allocated_emergencies = np.unique(emergency_obs[separate_results], axis=0)
+                    # Exclude rows with all zeros
+                    non_zero_rows = ~np.all(allocated_emergencies == 0, axis=1)
+                    allocated_emergencies = allocated_emergencies[non_zero_rows]
+                    assert len(start_indices) == len(end_indices) == len(allocated_emergencies)
+                    for emergency, emergency_start, emergency_end in (
+                            zip(allocated_emergencies, start_indices, end_indices)):
+                        allocate_index = np.nonzero(np.all(emergency == allocation_list, axis=1))[0]
+                        allocate_index = np.delete(allocate_index, np.where(assign_rewards[allocate_index] == -2))
+                        delta = emergency_end - emergency_start
+                        logging.debug(f"emergency_start: {emergency_start}, emergency_end: {emergency_end}")
+                        if emergency_end % episode_length < episode_length - 1:
+                            logging.debug(f"detected end: {emergency_end % episode_length}")
+                            trajectory_reward = execute_rewards[emergency_start:emergency_end]
+                            surveillance_reward = np.sum(trajectory_reward - np.floor(trajectory_reward))
+                            # Emergency cover reward consists of two components, one is the emergency cover reward
+                            # and the other is the distance discount factor. The closer to the emergency
+                            # the higher the reward
+                            discount_factor = (episode_length - delta) / episode_length
+                            if execute_rewards[emergency_end] >= EMERGENCY_REWARD_INCREMENT:
+                                emergency_cover_reward = EMERGENCY_REWARD_INCREMENT
+                            else:
+                                emergency_cover_reward = -1
+                            assign_rewards[allocate_index] = discount_factor * (surveillance_reward +
+                                                                                emergency_cover_reward)
+                    logging.debug(f"rewards for assignment agent: {assign_rewards}")
+                    full_batches[i][SampleBatch.REWARDS] = assign_rewards
+                device = model.device
+                mean_loss = torch.tensor(0.0).to(device)
+                progress = tqdm(full_batches)
+                for batch in progress:
+                    discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0.99)
+                    # normalize rewards
+                    discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
+                            discounted_rewards.std() + 1e-8)
+
+                    discounted_rewards = torch.from_numpy(discounted_rewards.copy()).to(device)
+                    inputs = torch.from_numpy(batch[SampleBatch.CUR_OBS]).to(device)
+                    batch_dist: Categorical = Categorical(probs=model.selector(inputs))
+                    actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
+                    log_probs = -batch_dist.log_prob(actions_tensor)
+                    loss = torch.mean(log_probs * discounted_rewards).to(device)
+                    progress.set_postfix({'loss': loss.item()})
+                    rl_optimizer.zero_grad()
+                    loss.backward()
+                    mean_loss += loss.detach()
+                    rl_optimizer.step()
+                    mean_loss /= len(full_batches)
+                model.selector.eval()
         model.last_rl_transitions = [[] for _ in range(model.num_envs)]
         logging.debug(f"RL Mean Loss: {mean_loss.item()}")
     model.tower_stats['mean_pg_loss'] = mean_loss
@@ -677,6 +792,12 @@ def sample_batch_with_demonstration(
             return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
 
 
+def after_loss_init(policy: Policy, observation_space: gym.spaces.Space,
+                    action_space: gym.spaces.Space, config: TrainerConfigDict) -> None:
+    policy.view_requirements[ORIGINAL_REWARDS] = ViewRequirement(
+        ORIGINAL_REWARDS, shift=0, used_for_training=True)
+
+
 TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
     name="TrafficPPOTorchPolicy",
     get_default_config=lambda: PPO_CONFIG,
@@ -684,6 +805,7 @@ TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
     loss_fn=add_regress_loss,
     extra_action_out_fn=extra_action_out_fn,
     stats_fn=kl_and_loss_stats_with_regress,
+    _after_loss_init=after_loss_init,
 )
 
 

@@ -792,27 +792,30 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 logging.debug("Probs: {}".format(probs))
                 action_dists: Categorical = Categorical(probs=probs)
                 actions = action_dists.sample().cpu().numpy()
-                reward = -np.linalg.norm(agents_pos[actions].cpu().numpy() - emergencies, axis=1)
+                reward = np.full(received_tasks, -1.0, dtype=np.float32)
+                # reward = -np.linalg.norm(agents_pos[actions].cpu().numpy() - emergencies, axis=1)
+                # logging.debug("Current EPS_ID: {}".format(self.step_count // (self.episode_length * self.num_envs)))
+                agent_ids = offset + actions
+                actual_emergency_indices = np.nonzero(valid_emergencies)[0]
+                for k, (agent_id, index) in enumerate(zip(agent_ids, actual_emergency_indices)):
+                    current_queue = my_emergency_queue[agent_id]
+                    logging.debug(f"Agent {agent_id} is assigned to Emergency {index}")
+                    if len(current_queue) < self.emergency_queue_length:
+                        current_queue.append(index)
+                    else:
+                        reward[k] = -2
+                    # logging.debug("Assignment Successful")
                 self.last_rl_transitions[i].append(
                     SampleBatch(
                         {
                             SampleBatch.REWARDS: reward,
                             SampleBatch.OBS: final_obs.cpu().numpy(),
                             SampleBatch.ACTIONS: actions,
-                            SampleBatch.EPS_ID: np.full_like(reward,
-                                                             self.step_count // (self.episode_length * self.num_envs)),
+                            # SampleBatch.EPS_ID: np.full_like(reward,
+                            #                                  self.step_count // (self.episode_length * self.num_envs)),
                         }
                     )
                 )
-                logging.debug("Current EPS_ID: {}".format(self.step_count // (self.episode_length * self.num_envs)))
-                agent_ids = offset + actions
-                actual_emergency_indices = np.nonzero(valid_emergencies)[0]
-                for agent_id, index in zip(agent_ids, actual_emergency_indices):
-                    current_queue = my_emergency_queue[agent_id]
-                    logging.debug(f"Agent {agent_id} is assigned to Emergency {index}")
-                    if len(current_queue) < self.emergency_queue_length:
-                        current_queue.append(index)
-                    # logging.debug("Assignment Successful")
 
         for i, emergency_queue in enumerate(my_emergency_queue):
             if len(emergency_queue) > 0:
