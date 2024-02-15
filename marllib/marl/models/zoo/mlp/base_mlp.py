@@ -1,18 +1,31 @@
 # MIT License
 import logging
 import os
-import random
 import pprint
-import heapq
-from typing import Tuple
-from torch.distributions import Categorical
-import pandas as pd
-from numba import njit
 from collections import deque
-from scipy.optimize import linear_sum_assignment, milp, LinearConstraint, Bounds
+from functools import reduce
+from typing import Tuple
+import concurrent.futures
+import multiprocessing
 import numpy as np
-# Copyright (c) 2023 Replicable-MARL
+import pandas as pd
+import wandb
+from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
+from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
+from ray.rllib.models.torch.misc import SlimFC, normc_initializer
+from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
+from ray.rllib.policy.sample_batch import SampleBatch
+from ray.rllib.utils.annotations import override
+from ray.rllib.utils.framework import try_import_torch
+from ray.rllib.utils.torch_ops import FLOAT_MIN
+from ray.rllib.utils.typing import Dict, TensorType, List
+from scipy.optimize import linear_sum_assignment, milp, LinearConstraint, Bounds
+from torch.distributions import Categorical
 
+from warp_drive.utils.common import get_project_root
+from warp_drive.utils.constants import Constants
+
+# Copyright (c) 2023 Replicable-MARL
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
 # in the Software without restriction, including without limitation the rights
@@ -30,21 +43,6 @@ import numpy as np
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-
-import wandb
-from ray.rllib.utils.torch_ops import FLOAT_MIN
-from functools import reduce
-from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
-from ray.rllib.models.torch.misc import SlimFC, normc_initializer
-from ray.rllib.utils.annotations import override
-from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.typing import Dict, TensorType, List
-from ray.rllib.policy.sample_batch import SampleBatch
-from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
-from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
-
-from warp_drive.utils.common import get_project_root
-from warp_drive.utils.constants import Constants
 
 torch, nn = try_import_torch()
 
@@ -67,6 +65,7 @@ def find_indices_for_cost(cost_array, matrix, atol):
         indices_list.append(indices)
     return indices_list
 
+
 def generate_agent_matrix(num_of_agents, num_of_tasks):
     matrix = np.zeros((num_of_agents, num_of_agents * num_of_tasks), dtype=int)
     col_indices = np.arange(0, num_of_agents * num_of_tasks)
@@ -74,6 +73,7 @@ def generate_agent_matrix(num_of_agents, num_of_tasks):
     # Use NumPy broadcasting to set the values efficiently
     matrix[row_indices, col_indices] = 1
     return matrix
+
 
 def argmax_to_mask(argmax_indices, num_classes=4, num_coords=2):
     # Create a mask tensor filled with zeros
@@ -93,6 +93,75 @@ def argmax_to_mask(argmax_indices, num_classes=4, num_coords=2):
     # Reshape the mask to have dimensions (len(argmax_indices), num_coords, num_classes)
     return mask
 
+
+def process_env(i, env_obs, this_coverage, my_emergency_queue,
+                emergency_xy, n_agents, look_ahead, device, emergency_queue_length,
+                selector, last_rl_transitions):
+    offset = i * n_agents
+    valid_emergencies = this_coverage == 0
+    env_queues = [list(q) for q in my_emergency_queue[offset:offset + n_agents]]
+    agents_pos = env_obs[:, n_agents + 2: n_agents + 4]
+
+    if look_ahead:
+        for j, my_queue in enumerate(env_queues):
+            if len(my_queue) > 0:
+                agents_pos[j] = torch.from_numpy(emergency_xy[my_queue[-1]])
+                logging.debug("Replace agent position with emergency position")
+
+    agents_queue_len = torch.tensor([len(q) for q in env_queues]).unsqueeze(-1).to(device)
+    single_invalid_mask = agents_queue_len.squeeze(-1) >= emergency_queue_length
+
+    additional_emergencies = [item for sublist in env_queues for item in sublist]
+    logging.debug(f"Additional Emergencies to remove: {additional_emergencies}")
+    valid_emergencies[additional_emergencies] = False
+
+    emergencies = emergency_xy[valid_emergencies]
+    received_tasks = len(emergencies)
+
+    if received_tasks > 0:
+        logging.debug(f"Valid Emergencies: {emergencies}")
+        actual_emergency_indices = np.nonzero(valid_emergencies)[0]
+        obs_list, action_list, reward_list = [], [], []
+
+        for k, emergency in enumerate(emergencies):
+            if torch.all(single_invalid_mask):
+                logging.debug("All agents are full, no further assignment will be made")
+                break
+
+            selector_obs = torch.cat([agents_pos, agents_queue_len], dim=1).flatten()
+            final_obs = torch.cat([selector_obs, torch.from_numpy(emergency).to(device)])
+            final_obs = final_obs.unsqueeze(0)
+            obs_list.append(final_obs.cpu().numpy())
+
+            probs = selector(final_obs, single_invalid_mask)
+            logging.debug("Probs: {}".format(probs))
+
+            action_dists: Categorical = Categorical(probs=probs)
+            action = int(action_dists.sample().cpu().numpy())
+            action_list.append(action)
+
+            agent_id = offset + action
+            current_queue = my_emergency_queue[agent_id]
+
+            if len(current_queue) < emergency_queue_length:
+                current_queue.append(actual_emergency_indices[k])
+                agents_queue_len[action] += 1
+                single_invalid_mask[action] = agents_queue_len[action] >= emergency_queue_length
+                reward_list.append(-1)
+            else:
+                logging.debug(f"Agent {agent_id} is full, no assignment is made")
+                reward_list.append(-2)
+
+        if len(obs_list) > 0:
+            last_rl_transitions[i].append(
+                SampleBatch(
+                    {
+                        SampleBatch.REWARDS: np.array(reward_list),
+                        SampleBatch.OBS: np.stack(obs_list, axis=-1),
+                        SampleBatch.ACTIONS: np.array(action_list),
+                    }
+                )
+            )
 
 class Predictor(nn.Module):
     def __init__(self, input_dim=22, hidden_size=64, output_dim=1):
@@ -200,6 +269,7 @@ class RandomAgentSelector(nn.Module):
 
     def forward(self, input_obs):
         return torch.rand((input_obs.shape[0], self.num_agents))
+
 
 class BaseMLPMixin:
 
@@ -355,6 +425,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.episode_length = 120
         self.switch_step = self.model_arch_args['switch_step']
         self.step_count = 0
+        self.local_mode = self.model_arch_args['local_mode']
         self.render = self.model_arch_args['render']
         if self.render:
             self.render_file_name = self.model_arch_args['render_file_name']
@@ -365,7 +436,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self._is_train = False
         self.with_task_allocation = self.custom_config["with_task_allocation"]
         self.separate_encoder = self.custom_config["separate_encoder"]
-        self.num_envs = self.custom_config["num_envs"]
+        self.num_envs = self.custom_config["num_envs"] if not self.local_mode else 10
         self.status_dim = self.custom_config["status_dim"]
         self.gen_interval = self.model_arch_args['gen_interval']
         self.emergency_threshold = self.model_arch_args['emergency_threshold']
@@ -427,7 +498,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.last_predicted_values = None
         self.actors = [self.p_encoder, self.p_branch]
         self.critics = [self.vf_encoder, self.vf_branch]
-        self.rl_optimizer = None
+
         self.actor_initialized_parameters = self.actor_parameters()
         if self.selector_type == "greedy":
             self.selector = GreedySelector(self.n_agents, num_outputs)
@@ -574,8 +645,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                                self.emergency_mode, self.emergency_target,
                                                self.emergency_indices)
                     elif self.selector_type == 'RL':
-                        self.rl_assignment(all_obs, emergency_xy, target_coverage,
-                                           self.emergency_queue, self.n_agents)
+                        self.rl_assignment(all_obs, emergency_xy, target_coverage, self.emergency_queue, self.n_agents)
                     else:
                         # old_reference = self.oracle_assignment(all_obs.clone().detach(), emergency_xy, target_coverage,
                         #                        self.mock_emergency_mode, self.mock_emergency_target,
@@ -644,7 +714,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                                 for emergency_index in target_to_queue:
                                                     if len(my_queue) < self.emergency_queue_length:
                                                         my_queue.append(
-                                                                       (actual_emergency_indices[emergency_index]))
+                                                            (actual_emergency_indices[emergency_index]))
                                                     else:
                                                         break
                                 else:
@@ -759,7 +829,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                               "No allocation is made")
 
     def rl_assignment(self, all_obs, emergency_xy, target_coverage, my_emergency_queue, n_agents):
-        all_env_obs = all_obs.clone().detach().reshape(-1, n_agents, 22)
+        all_env_obs = all_obs.clone().detach().reshape(-1, n_agents, self.status_dim + self.emergency_feature_dim)
         env_target_coverage = target_coverage[::n_agents]
         for i, this_coverage in enumerate(env_target_coverage):
             covered_emergency = this_coverage == 1
@@ -773,60 +843,65 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
 
         for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs, env_target_coverage)):
             offset = i * n_agents
+            env_queues = [list(q) for q in my_emergency_queue[offset:offset + n_agents]]
+            agents_queue_len = torch.tensor([len(q) for q in env_queues]).unsqueeze(-1).to(self.device)
+            single_invalid_mask = agents_queue_len.squeeze(-1) >= self.emergency_queue_length
+            if torch.all(single_invalid_mask):
+                logging.debug("All agents are full, no further assignment will be made")
+                continue
             valid_emergencies = this_coverage == 0
             # convert all queue entries in an env into a list
-            env_queues = [list(q) for q in my_emergency_queue[offset:offset + n_agents]]
             agents_pos = env_obs[:, n_agents + 2: n_agents + 4]
             if self.look_ahead:
                 for j, my_queue in enumerate(env_queues):
                     if len(my_queue) > 0:
                         agents_pos[j] = torch.from_numpy(emergency_xy[my_queue[-1]])
                         logging.debug("Replace agent position with emergency position")
-            agents_queue_len = torch.tensor([len(q) for q in env_queues]).unsqueeze(-1).to(self.device)
-            single_invalid_mask = agents_queue_len.squeeze(-1) >= self.emergency_queue_length
-            if torch.all(single_invalid_mask):
-                logging.debug("All agents are full, no assignment is made")
-                continue
+
             # unwrap list of list, remove emergencies in agents queue.
             additional_emergencies = [item for sublist in env_queues for item in sublist]
             logging.debug(f"Additional Emergencies to remove: {additional_emergencies}")
             valid_emergencies[additional_emergencies] = False
             emergencies = emergency_xy[valid_emergencies]
-            logging.debug(f"Valid Emergencies: {emergencies}")
             received_tasks = len(emergencies)
             if received_tasks > 0:
-                selector_obs = torch.cat([agents_pos, agents_queue_len], dim=1).flatten().repeat(received_tasks, 1)
-                final_obs = torch.cat([selector_obs, torch.from_numpy(emergencies).to(self.device)], dim=1)
-                # agents allocated in the same round can not be excluded.
-                invalid_mask = single_invalid_mask.repeat(received_tasks, 1)
-                probs = self.selector(final_obs, invalid_mask)
-                logging.debug("Probs: {}".format(probs))
-                action_dists: Categorical = Categorical(probs=probs)
-                actions = action_dists.sample().cpu().numpy()
-                reward = np.full(received_tasks, -1.0, dtype=np.float32)
-                # reward = -np.linalg.norm(agents_pos[actions].cpu().numpy() - emergencies, axis=1)
-                # logging.debug("Current EPS_ID: {}".format(self.step_count // (self.episode_length * self.num_envs)))
-                agent_ids = offset + actions
+                logging.debug(f"Valid Emergencies: {emergencies}")
                 actual_emergency_indices = np.nonzero(valid_emergencies)[0]
-                for k, (agent_id, index) in enumerate(zip(agent_ids, actual_emergency_indices)):
+                obs_list, action_list, reward_list = [], [], []
+                for k, emergency in enumerate(emergencies):
+                    if torch.all(single_invalid_mask):
+                        logging.debug("All agents are full, no further assignment will be made")
+                        break
+                    selector_obs = torch.cat([agents_pos, agents_queue_len], dim=1).flatten()
+                    final_obs = torch.cat([selector_obs, torch.from_numpy(emergency).to(self.device)])
+                    final_obs = final_obs.unsqueeze(0)
+                    obs_list.append(final_obs.cpu().numpy())
+                    probs = self.selector(final_obs, single_invalid_mask)
+                    logging.debug("Probs: {}".format(probs))
+                    action_dists: Categorical = Categorical(probs=probs)
+                    action = int(action_dists.sample().cpu().numpy())
+                    action_list.append(action)
+                    # reward = -np.linalg.norm(agents_pos[actions].cpu().numpy() - emergencies, axis=1)
+                    agent_id = offset + action
                     current_queue = my_emergency_queue[agent_id]
-                    logging.debug(f"Agent {agent_id} is assigned to Emergency {index}")
                     if len(current_queue) < self.emergency_queue_length:
-                        current_queue.append(index)
+                        current_queue.append(actual_emergency_indices[k])
+                        agents_queue_len[action] += 1
+                        single_invalid_mask[action] = agents_queue_len[action] >= self.emergency_queue_length
+                        reward_list.append(-1)
                     else:
-                        reward[k] = -2
-                    # logging.debug("Assignment Successful")
-                self.last_rl_transitions[i].append(
-                    SampleBatch(
-                        {
-                            SampleBatch.REWARDS: reward,
-                            SampleBatch.OBS: final_obs.cpu().numpy(),
-                            SampleBatch.ACTIONS: actions,
-                            # SampleBatch.EPS_ID: np.full_like(reward,
-                            #                                  self.step_count // (self.episode_length * self.num_envs)),
-                        }
+                        logging.debug(f"Agent {agent_id} is full, no assignment is made")
+                        reward_list.append(-2)
+                if len(obs_list) > 0:
+                    self.last_rl_transitions[i].append(
+                        SampleBatch(
+                            {
+                                SampleBatch.REWARDS: np.array(reward_list),
+                                SampleBatch.OBS: np.vstack(obs_list),
+                                SampleBatch.ACTIONS: np.array(action_list),
+                            }
+                        )
                     )
-                )
 
         for i, emergency_queue in enumerate(my_emergency_queue):
             if len(emergency_queue) > 0:
@@ -974,7 +1049,7 @@ def construct_query_batch(
 
     for i, this_coverage in enumerate(target_coverage):
         my_queue: deque = my_emergency_queue[i]
-        if len(my_queue) < max_queue_length:
+        if not my_emergency_mode[i]:
             env_num = i // n_agents
             offset = env_num * n_agents
             valid_emergencies = this_coverage == 0

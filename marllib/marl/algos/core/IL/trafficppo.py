@@ -189,56 +189,6 @@ def get_start_indices_of_segments(array):
     return start_indices
 
 
-def label_rl_rewards_and_calculate_gae_for_sample_batch(
-        policy: TorchPolicy,
-        sample_batch: SampleBatch,
-        other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
-        episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
-    status_dim = policy.model.status_dim
-    emergency_dim = policy.model.emergency_feature_dim
-    # postprocess extra_batches
-    try:
-        virtual_obs = sample_batch[VIRTUAL_OBS]
-        sample_batch[SampleBatch.OBS][..., :status_dim + emergency_dim] = virtual_obs
-    except KeyError:
-        pass
-    # check whether numbers between status_dim:status_dim + emergency_dim are all zeros, one row per value
-    emergency_obs = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
-    no_emergency_mask = np.nansum(np.abs(emergency_obs), axis=1) == 0
-    emergencies_masks = []
-    separate_batches = []
-    last_index = 0
-    try:
-        raw_rewards = sample_batch['original_rewards']
-    except KeyError:
-        raw_rewards = sample_batch[SampleBatch.REWARDS]
-    separate_result = get_start_indices_of_segments(emergency_obs)
-    for index in separate_result[1:]:
-        separate_batches.append(sample_batch[last_index:index + 1].copy())
-        emergencies_masks.append(no_emergency_mask[last_index:index + 1])
-        last_index = index + 1
-    if len(separate_batches) == 0:
-        sample_batch['labels'] = np.where(no_emergency_mask, 1, -1)
-        return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
-    if last_index < len(raw_rewards):
-        separate_batches.append(sample_batch[last_index:].copy())
-        emergencies_masks.append(no_emergency_mask[last_index:])
-    labeled_batches = []
-    length = len(separate_batches)
-    for i, (mask, batch) in enumerate(zip(emergencies_masks, separate_batches)):
-        batch_length = len(batch[SampleBatch.REWARDS])
-        if i != length - 1:
-            labels = np.arange(start=batch_length, stop=0, step=-1) / episode_length
-            batch['labels'] = np.where(mask, labels, -1)
-        else:
-            batch['labels'] = np.full(batch_length,
-                                      -1)  # discard last batch by default since it contains truncated result.
-        labeled_batches.append(batch)
-        # labeled_batches.append(compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode))
-    full_batch = SampleBatch.concat_samples(labeled_batches)
-    return compute_gae_for_sample_batch(policy, full_batch, other_agent_batches, episode)
-
-
 def label_done_masks_and_calculate_gae_for_sample_batch(
         policy: TorchPolicy,
         sample_batch: SampleBatch,
@@ -436,7 +386,6 @@ def modify_batch_with_intrinsic(agents_position, emergency_position, emergency_s
     else:
         sample_batch[SampleBatch.REWARDS] += intrinsic
 
-
 def calculate_intrinsic(agents_position: np.ndarray,
                         emergency_position: np.ndarray,
                         emergency_states: np.ndarray,
@@ -448,7 +397,7 @@ def calculate_intrinsic(agents_position: np.ndarray,
     """
     # mask out penalty where emergency_positions are (0,0), which indicates the agent is not in the emergency.
 
-    mask = emergency_position.sum(axis=-1) != 0
+    mask = (emergency_position[..., 0] != 0) | (emergency_position[..., 1] != 0)
     distances = np.linalg.norm(agents_position - emergency_position, axis=1)
     # find [aoi, (x,y)] array in state
     if not fake:
@@ -542,7 +491,7 @@ def add_regress_loss(
                 # update assignment rl trajectory with lower level agent trajectories
                 lower_agent_batches = train_batch.split_by_episode()
                 episode_length = policy.model.episode_length
-                print("Number of batches: ", len(lower_agent_batches))
+                # print("Number of batches: ", len(lower_agent_batches))
                 for i, lower_agent_batch in enumerate(lower_agent_batches):
                     assign_rewards = full_batches[i][SampleBatch.REWARDS]
                     try:
@@ -558,6 +507,8 @@ def add_regress_loss(
                         emergency_obs = emergency_obs.cpu().numpy()
                     # Determine start and end indices
                     start_indices, end_indices = get_emergency_start_end_standard(emergency_obs)
+                    # mock_end, mock_start, _ = get_emergency_start_end(emergency_obs)
+                    # assert np.all(mock_end == end_indices) and np.all(mock_start == start_indices)
                     # test this function on different dataset
                     allocated_emergencies = emergency_obs[start_indices]
                     # Exclude rows with all zeros
@@ -569,8 +520,8 @@ def add_regress_loss(
                     full_batches[i][SampleBatch.REWARDS] = assign_rewards
                 device = model.device
                 mean_loss = torch.tensor(0.0).to(device)
-                progress = tqdm(full_batches)
-                for batch in progress:
+                # progress = tqdm(full_batches)
+                for batch in full_batches:
                     discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0.99)
                     # normalize rewards
                     discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
@@ -582,7 +533,7 @@ def add_regress_loss(
                     actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
                     log_probs = -batch_dist.log_prob(actions_tensor)
                     loss = torch.mean(log_probs * discounted_rewards).to(device)
-                    progress.set_postfix({'loss': loss.item()})
+                    # progress.set_postfix({'loss': loss.item()})
                     rl_optimizer.zero_grad()
                     loss.backward()
                     mean_loss += loss.detach()
@@ -605,7 +556,7 @@ def add_regress_loss(
     return total_loss
 
 
-@njit
+# @njit
 def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewards, end_indices, episode_length,
                              execute_rewards, start_indices):
     for emergency, emergency_start, emergency_end in (
