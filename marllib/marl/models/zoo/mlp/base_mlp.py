@@ -681,8 +681,15 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             logging.debug(f"Emergency Queue: {self.emergency_queue[:16]}")
             logging.debug(f"Emergency Queue Length: {[len(q) for q in self.emergency_queue[:16]]}")
             if self.render:
+                if self.selector_type == 'RL':
+                    for i, queue in enumerate(self.emergency_queue[:self.n_agents]):
+                        if len(queue) > 0:
+                            self.emergency_target_list[timestep][i] = queue[0]
+                        else:
+                            self.emergency_target_list[timestep][i] = -1
+                else:
+                    self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents]
                 self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents]
-                self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents]
                 self.emergency_queue_list[timestep] = [len(q) for q in self.emergency_queue[:self.n_agents]]
             if timestep == self.episode_length - 1:
                 if self.render:
@@ -693,6 +700,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     # concatenate all rendering information
                     all_rendering_info = np.concatenate(
                         [self.emergency_mode_list,
+                         self.emergency_queue_list,
                          self.emergency_target_list.reshape(self.episode_length, -1),
                          ], axis=-1)
                     # convert to pandas dataframe

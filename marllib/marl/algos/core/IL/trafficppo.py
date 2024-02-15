@@ -528,7 +528,7 @@ def add_regress_loss(
     else:
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
-    if hasattr(model, "selector_type") and model.selector_type == 'RL':
+    if hasattr(model, "selector_type") and model.selector_type == 'RL' and not model.render:
         parameters_list = [item for item in model.selector.parameters()]
         if len(parameters_list) > 0:
             rl_optimizer = optim.Adam(parameters_list, lr=0.001)
@@ -546,60 +546,26 @@ def add_regress_loss(
                 for i, lower_agent_batch in enumerate(lower_agent_batches):
                     assign_rewards = full_batches[i][SampleBatch.REWARDS]
                     try:
-                        execute_rewards = lower_agent_batch['original_rewards'].cpu().numpy()
+                        execute_rewards = lower_agent_batch['original_rewards']
                     except KeyError:
-                        execute_rewards = lower_agent_batch[SampleBatch.REWARDS].cpu().numpy()
+                        execute_rewards = lower_agent_batch[ORIGINAL_REWARDS].cpu().numpy()
+                    if isinstance(execute_rewards, torch.Tensor):
+                        execute_rewards = execute_rewards.cpu().numpy()
                     allocation_list = full_batches[i][SampleBatch.OBS][..., -2:]
                     emergency_obs = lower_agent_batch[SampleBatch.OBS][...,
-                                    status_dim:status_dim + emergency_dim].cpu().numpy()
-                    separate_results = np.where(np.any(np.diff(emergency_obs, axis=0) != 0, axis=1))[0] + 1
+                                    status_dim:status_dim + emergency_dim]
+                    if isinstance(emergency_obs, torch.Tensor):
+                        emergency_obs = emergency_obs.cpu().numpy()
                     # Determine start and end indices
-                    start_indices, end_indices = [], []
-                    length = len(separate_results)
-                    j = 0
-                    while j < length:
-                        start_indices.append(separate_results[j])
-                        if j < length - 1:
-                            expected_end = separate_results[j + 1]
-                            end_indices.append(expected_end - 1)
-                            if not np.any(emergency_obs[expected_end]):
-                                j += 2
-                            else:
-                                j += 1
-                        else:
-                            end_indices.append(len(emergency_obs) - 1)
-                            j += 1
-                    # # add last start_indices if its emergency is not empty
-                    # if np.any(emergency_obs[-1]):
-                    #     start_indices.append(separate_results[-1])
-                    #     end_indices.append(len(emergency_obs) - 1)
+                    start_indices, end_indices = get_emergency_start_end_standard(emergency_obs)
                     # test this function on different dataset
-                    allocated_emergencies = np.unique(emergency_obs[separate_results], axis=0)
+                    allocated_emergencies = emergency_obs[start_indices]
                     # Exclude rows with all zeros
-                    non_zero_rows = ~np.all(allocated_emergencies == 0, axis=1)
-                    allocated_emergencies = allocated_emergencies[non_zero_rows]
+                    logging.debug(f"start_indices: {len(start_indices)}, end_indices: {len(end_indices)}")
+                    logging.debug(f"Allocated emergencies: {len(allocated_emergencies)}")
                     assert len(start_indices) == len(end_indices) == len(allocated_emergencies)
-                    for emergency, emergency_start, emergency_end in (
-                            zip(allocated_emergencies, start_indices, end_indices)):
-                        allocate_index = np.nonzero(np.all(emergency == allocation_list, axis=1))[0]
-                        allocate_index = np.delete(allocate_index, np.where(assign_rewards[allocate_index] == -2))
-                        delta = emergency_end - emergency_start
-                        logging.debug(f"emergency_start: {emergency_start}, emergency_end: {emergency_end}")
-                        if emergency_end % episode_length < episode_length - 1:
-                            logging.debug(f"detected end: {emergency_end % episode_length}")
-                            trajectory_reward = execute_rewards[emergency_start:emergency_end]
-                            surveillance_reward = np.sum(trajectory_reward - np.floor(trajectory_reward))
-                            # Emergency cover reward consists of two components, one is the emergency cover reward
-                            # and the other is the distance discount factor. The closer to the emergency
-                            # the higher the reward
-                            discount_factor = (episode_length - delta) / episode_length
-                            if execute_rewards[emergency_end] >= EMERGENCY_REWARD_INCREMENT:
-                                emergency_cover_reward = EMERGENCY_REWARD_INCREMENT
-                            else:
-                                emergency_cover_reward = -1
-                            assign_rewards[allocate_index] = discount_factor * (surveillance_reward +
-                                                                                emergency_cover_reward)
-                    logging.debug(f"rewards for assignment agent: {assign_rewards}")
+                    calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewards, end_indices,
+                                             episode_length, execute_rewards, start_indices)
                     full_batches[i][SampleBatch.REWARDS] = assign_rewards
                 device = model.device
                 mean_loss = torch.tensor(0.0).to(device)
@@ -637,6 +603,32 @@ def add_regress_loss(
     model.eval()
 
     return total_loss
+
+
+@njit
+def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewards, end_indices, episode_length,
+                             execute_rewards, start_indices):
+    for emergency, emergency_start, emergency_end in (
+            zip(allocated_emergencies, start_indices, end_indices)):
+        allocate_index = np.nonzero((emergency[0] == allocation_list[..., 0]) &
+                                    (emergency[1] == allocation_list[..., 1]) &
+                                    (assign_rewards != -2))[0]
+        delta = emergency_end - emergency_start
+        # logging.debug(f"emergency_start: {emergency_start}, emergency_end: {emergency_end}")
+        if emergency_end % episode_length < episode_length - 1:
+            # logging.debug(f"detected end: {emergency_end % episode_length}")
+            trajectory_reward = execute_rewards[emergency_start:emergency_end]
+            surveillance_reward = np.sum(trajectory_reward - np.floor(trajectory_reward))
+            # Emergency cover reward consists of two components, one is the emergency cover reward
+            # and the other is the distance discount factor. The closer to the emergency
+            # the higher the reward
+            discount_factor = (episode_length - delta) / episode_length
+            if execute_rewards[emergency_end] >= EMERGENCY_REWARD_INCREMENT:
+                emergency_cover_reward = EMERGENCY_REWARD_INCREMENT
+            else:
+                emergency_cover_reward = -1
+            assign_rewards[allocate_index] = discount_factor * (surveillance_reward + emergency_cover_reward)
+    # logging.debug(f"rewards for assignment agent: {assign_rewards}")
 
 
 def add_regress_loss_old(
@@ -827,3 +819,55 @@ TrafficPPOTrainer = WandbPPOTrainer.with_updates(
     default_policy=None,
     get_policy_class=get_policy_class_traffic_ppo,
 )
+
+
+@njit
+def get_emergency_start_end_standard(emergency_obs: np.ndarray):
+    start_indices, end_indices = [], []
+    length = len(emergency_obs)
+    i = 0
+    while i < length:
+        entry = emergency_obs[i]
+        if entry.any():
+            start_indices.append(i)
+            last_entry = entry
+            while np.all(last_entry == entry):
+                i += 1
+                if i < length:
+                    entry = emergency_obs[i]
+                else:
+                    break
+            end_indices.append(i - 1)
+        else:
+            i += 1
+    return start_indices, end_indices
+
+
+def get_emergency_start_end(emergency_obs: np.ndarray):
+    separate_results = list(np.where(np.any(np.diff(emergency_obs, axis=0) != 0, axis=1))[0] + 1)
+    start_indices, end_indices = [], []
+    length = len(separate_results)
+    j = 0
+    while j < length:
+        start_indices.append(separate_results[j])
+        if j < length - 1:
+            expected_end = separate_results[j + 1]
+            end_indices.append(expected_end - 1)
+            if not np.any(emergency_obs[expected_end]):
+                j += 2
+            else:
+                j += 1
+        else:
+            end_indices.append(len(emergency_obs) - 1)
+            j += 1
+    if np.any(emergency_obs[0]):
+        # deal with the bug for np.diff ignoring prefix.
+        if np.any(np.all(emergency_obs == 0, axis=1)):
+            start_indices[0] = 0
+            end_indices[0] = separate_results[0] - 1
+            separate_results[0] = 0
+        else:
+            start_indices.insert(0, 0)
+            end_indices.insert(0, separate_results[0] - 1)
+            separate_results.insert(0, 0)
+    return end_indices, start_indices, separate_results
