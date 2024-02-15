@@ -17,7 +17,7 @@ from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.torch_ops import FLOAT_MIN
+from ray.rllib.utils.torch_ops import FLOAT_MIN, FLOAT_MAX
 from ray.rllib.utils.typing import Dict, TensorType, List
 from scipy.optimize import linear_sum_assignment, milp, LinearConstraint, Bounds
 from torch.distributions import Categorical
@@ -219,7 +219,7 @@ class AgentSelector(nn.Module):
     def forward(self, input_obs, invalid_mask=None):
         input_obs = self.fc(input_obs)
         if invalid_mask is not None:
-            input_obs -= invalid_mask * 1e10
+            input_obs -= invalid_mask * FLOAT_MAX
         action_scores = torch.nn.functional.softmax(input_obs, dim=1)
         return action_scores
 
@@ -257,7 +257,7 @@ class GreedyAgentSelector(nn.Module):
         agent_positions = input_obs[:, :-2].reshape(-1, self.num_agents, 3)[..., :2]
         target_positions = input_obs[:, -2:].repeat(self.num_agents, 1).reshape(-1, self.num_agents, 2)
         distances = torch.norm(agent_positions - target_positions, dim=-1)
-        distances[invalid_mask] = float('inf')
+        distances += (FLOAT_MAX - 5) * invalid_mask
         return torch.nn.functional.one_hot(torch.argmin(distances, dim=-1), self.num_agents)
 
 

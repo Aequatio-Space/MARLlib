@@ -2,38 +2,38 @@
 PyTorch policy class used for PPO.
 """
 import datetime
+import logging
 import os
 import pickle
 import random
 import re
+from copy import deepcopy
+from typing import Dict, List, Type, Union, Optional
 
 import gym
-from numba import njit
-import logging
-from typing import Dict, List, Type, Union, Optional
-from copy import deepcopy
 import numpy as np
-from ray.rllib.evaluation.postprocessing import discount_cumsum
-from ray.rllib.policy.view_requirement import ViewRequirement
-from torch.distributions import Categorical
-from tqdm import tqdm
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
+from numba import njit
 from ray.rllib.agents.ppo import PPOTorchPolicy, DEFAULT_CONFIG as PPO_CONFIG
+from ray.rllib.agents.ppo.ppo_torch_policy import (kl_and_loss_stats, vf_preds_fetches,
+                                                   ppo_surrogate_loss, compute_gae_for_sample_batch)
 from ray.rllib.evaluation import MultiAgentEpisode
+from ray.rllib.evaluation.postprocessing import discount_cumsum
 from ray.rllib.models.modelv2 import ModelV2
 from ray.rllib.models.torch.torch_action_dist import TorchDistributionWrapper
 from ray.rllib.policy.policy import Policy
-from ray.rllib.policy.torch_policy import TorchPolicy
-from ray.rllib.agents.ppo.ppo_torch_policy import (kl_and_loss_stats, vf_preds_fetches,
-                                                   ppo_surrogate_loss, compute_gae_for_sample_batch)
 from ray.rllib.policy.sample_batch import SampleBatch
+from ray.rllib.policy.torch_policy import TorchPolicy
+from ray.rllib.policy.view_requirement import ViewRequirement
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.typing import TensorType, TrainerConfigDict, AgentID
 from torch import optim
+from torch.distributions import Categorical
+from tqdm import tqdm
 
 ORIGINAL_REWARDS = 'original_rewards'
 
-EMERGENCY_REWARD_INCREMENT = 2.0
+EMERGENCY_REWARD_INCREMENT = 1.0
 
 torch, nn = try_import_torch()
 
@@ -43,7 +43,7 @@ VIRTUAL_OBS = 'virtual_obs'
 
 use_large_emergency = False
 
-# dirty hack, should be removed later
+# dirty hack should be removed later
 episode_length = 120
 
 
@@ -327,7 +327,7 @@ def compute_gae_and_intrinsic_for_sample_batch(
         sample_batch: SampleBatch,
         other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
         episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
-    """Adds GAE (generalized advantage estimations) to a trajectory.
+    """adds GAE (generalized advantage estimations) to a trajectory.
 
     The trajectory contains only data from one episode and from one agent.
     - If  `config.batch_mode=truncate_episodes` (default), sample_batch may
@@ -359,7 +359,7 @@ def compute_gae_and_intrinsic_for_sample_batch(
     else:
         num_agents = 1
 
-    obs_shape = sample_batch[SampleBatch.OBS].shape
+    # obs_shape = sample_batch[SampleBatch.OBS].shape
     agents_position = sample_batch[SampleBatch.OBS][..., num_agents + 2: num_agents + 4]
     # other_agents_relative_position = sample_batch[SampleBatch.OBS] \
     #     [..., num_agents + 4: num_agents + 4 + 2 * (num_agents - 1)].reshape(obs_shape[0], -1, 2)
@@ -386,12 +386,12 @@ def modify_batch_with_intrinsic(agents_position, emergency_position, emergency_s
     else:
         sample_batch[SampleBatch.REWARDS] += intrinsic
 
+
 def calculate_intrinsic(agents_position: np.ndarray,
                         emergency_position: np.ndarray,
                         emergency_states: np.ndarray,
                         emergency_threshold: int,
-                        fake=False,
-                        device='cpu'):
+                        fake=False):
     """
     calculate the intrinsic reward for each agent, which is the product of distance and aoi.
     """
@@ -422,7 +422,7 @@ def match_aoi(all_emergencies_position: np.ndarray,
     for i, this_timestep_pos in enumerate(emergency_position):
         if mask[i]:
             match_status = all_emergencies_position[i] == this_timestep_pos
-            find_index = np.where((match_status[:, 0] == True) & (match_status[:, 1] == True))[0]
+            find_index = np.where((match_status[:, 0] is True) & (match_status[:, 1] is True))[0]
             if len(find_index) > 0:
                 indices[i] = find_index[0]
     return indices
@@ -570,7 +570,7 @@ def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewa
             # logging.debug(f"detected end: {emergency_end % episode_length}")
             trajectory_reward = execute_rewards[emergency_start:emergency_end]
             surveillance_reward = np.sum(trajectory_reward - np.floor(trajectory_reward))
-            # Emergency cover reward consists of two components, one is the emergency cover reward
+            # Emergency cover reward consists of two parts, one is the emergency cover reward
             # and the other is the distance discount factor. The closer to the emergency
             # the higher the reward
             discount_factor = (episode_length - delta) / episode_length
