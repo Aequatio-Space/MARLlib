@@ -327,7 +327,7 @@ def compute_gae_and_intrinsic_for_sample_batch(
         sample_batch: SampleBatch,
         other_agent_batches: Optional[Dict[AgentID, SampleBatch]] = None,
         episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
-    """adds GAE (generalized advantage estimations) to a trajectory.
+    """GAE (generalized advantage estimations) to a trajectory.
 
     The trajectory contains only data from one episode and from one agent.
     - If  `config.batch_mode=truncate_episodes` (default), sample_batch may
@@ -386,7 +386,6 @@ def modify_batch_with_intrinsic(agents_position, emergency_position, emergency_s
     else:
         sample_batch[SampleBatch.REWARDS] += intrinsic
 
-
 def calculate_intrinsic(agents_position: np.ndarray,
                         emergency_position: np.ndarray,
                         emergency_states: np.ndarray,
@@ -397,7 +396,7 @@ def calculate_intrinsic(agents_position: np.ndarray,
     """
     # mask out penalty where emergency_positions are (0,0), which indicates the agent is not in the emergency.
 
-    mask = (emergency_position[..., 0] != 0) | (emergency_position[..., 1] != 0)
+    mask = emergency_position.sum(axis=-1) != 0
     distances = np.linalg.norm(agents_position - emergency_position, axis=1)
     # find [aoi, (x,y)] array in state
     if not fake:
@@ -422,7 +421,7 @@ def match_aoi(all_emergencies_position: np.ndarray,
     for i, this_timestep_pos in enumerate(emergency_position):
         if mask[i]:
             match_status = all_emergencies_position[i] == this_timestep_pos
-            find_index = np.where((match_status[:, 0] is True) & (match_status[:, 1] is True))[0]
+            find_index = np.where(match_status[:, 0] & match_status[:, 1])[0]
             if len(find_index) > 0:
                 indices[i] = find_index[0]
     return indices

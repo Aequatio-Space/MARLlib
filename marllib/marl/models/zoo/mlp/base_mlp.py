@@ -219,7 +219,7 @@ class AgentSelector(nn.Module):
     def forward(self, input_obs, invalid_mask=None):
         input_obs = self.fc(input_obs)
         if invalid_mask is not None:
-            input_obs -= invalid_mask * FLOAT_MAX
+            input_obs -= invalid_mask * (FLOAT_MAX / 2)
         action_scores = torch.nn.functional.softmax(input_obs, dim=1)
         return action_scores
 
@@ -646,10 +646,11 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                                self.emergency_indices)
                     elif self.selector_type == 'RL':
                         self.rl_assignment(all_obs, emergency_xy, target_coverage, self.emergency_queue, self.n_agents)
-                    else:
                         # old_reference = self.oracle_assignment(all_obs.clone().detach(), emergency_xy, target_coverage,
                         #                        self.mock_emergency_mode, self.mock_emergency_target,
                         #                        self.mock_emergency_indices)
+                        # assert torch.all(all_obs == old_reference)
+                    else:
                         (query_batch, actual_emergency_indices, stop_index,
                          last_round_emergency_agents, allocation_agents) = (
                             construct_query_batch(
@@ -741,7 +742,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                             self.emergency_feature_dim
                         )
                         all_obs = torch.from_numpy(all_obs).to(self.device)
-                        # assert torch.all(all_obs == old_reference)
                         # assert np.all(self.emergency_mode == self.mock_emergency_mode)
                         # assert np.all(self.emergency_indices == self.mock_emergency_indices)
                         # assert np.all(self.emergency_target == self.mock_emergency_target)
@@ -843,26 +843,26 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
 
         for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs, env_target_coverage)):
             offset = i * n_agents
-            env_queues = [list(q) for q in my_emergency_queue[offset:offset + n_agents]]
-            agents_queue_len = torch.tensor([len(q) for q in env_queues]).unsqueeze(-1).to(self.device)
-            single_invalid_mask = agents_queue_len.squeeze(-1) >= self.emergency_queue_length
-            if torch.all(single_invalid_mask):
-                logging.debug("All agents are full, no further assignment will be made")
-                continue
             valid_emergencies = this_coverage == 0
             # convert all queue entries in an env into a list
+            env_queues = [list(q) for q in my_emergency_queue[offset:offset + n_agents]]
             agents_pos = env_obs[:, n_agents + 2: n_agents + 4]
             if self.look_ahead:
                 for j, my_queue in enumerate(env_queues):
                     if len(my_queue) > 0:
                         agents_pos[j] = torch.from_numpy(emergency_xy[my_queue[-1]])
                         logging.debug("Replace agent position with emergency position")
-
+            agents_queue_len = torch.tensor([len(q) for q in env_queues]).unsqueeze(-1).to(self.device)
+            single_invalid_mask = agents_queue_len.squeeze(-1) >= self.emergency_queue_length
+            if torch.all(single_invalid_mask):
+                logging.debug("All agents are full, no assignment is made")
+                continue
             # unwrap list of list, remove emergencies in agents queue.
             additional_emergencies = [item for sublist in env_queues for item in sublist]
             logging.debug(f"Additional Emergencies to remove: {additional_emergencies}")
             valid_emergencies[additional_emergencies] = False
             emergencies = emergency_xy[valid_emergencies]
+            logging.debug(f"Valid Emergencies: {emergencies}")
             received_tasks = len(emergencies)
             if received_tasks > 0:
                 logging.debug(f"Valid Emergencies: {emergencies}")
