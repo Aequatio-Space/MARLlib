@@ -433,6 +433,7 @@ def add_regress_loss(
         train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
     logging.debug("add_regress_loss is called")
     status_dim = policy.model.status_dim
+    device = model.device
     emergency_dim = policy.model.emergency_feature_dim
     if hasattr(model, "selector_type") and model.selector_type == 'NN':
         batch_size = 32
@@ -476,8 +477,9 @@ def add_regress_loss(
     else:
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
-    if hasattr(model, "selector_type") and model.selector_type == 'RL' and not model.render:
+    if hasattr(model, "selector_type") and model.selector_type == 'RL':
         parameters_list = [item for item in model.selector.parameters()]
+        mean_reward = torch.tensor(0.0).to(device)
         if len(parameters_list) > 0:
             rl_optimizer = optim.Adam(parameters_list, lr=0.001)
             model.selector.train()
@@ -486,7 +488,8 @@ def add_regress_loss(
                 for transitions in model.last_rl_transitions[model.train_count * 10:(model.train_count + 1) * 10]:
                     if len(transitions) > 0:
                         full_batches.append(SampleBatch.concat_samples(transitions))
-            if len(full_batches) > 0:
+            length_of_batches = len(full_batches)
+            if length_of_batches > 0:
                 # update assignment rl trajectory with lower level agent trajectories
                 lower_agent_batches = train_batch.split_by_episode()
                 episode_length = policy.model.episode_length
@@ -517,16 +520,15 @@ def add_regress_loss(
                     calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewards, end_indices,
                                              episode_length, execute_rewards, start_indices)
                     full_batches[i][SampleBatch.REWARDS] = assign_rewards
-                device = model.device
                 mean_loss = torch.tensor(0.0).to(device)
                 # progress = tqdm(full_batches)
                 for batch in full_batches:
                     discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0.99)
                     # normalize rewards
-                    discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
-                            discounted_rewards.std() + 1e-8)
-
+                    # discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
+                    #         discounted_rewards.std() + 1e-8)
                     discounted_rewards = torch.from_numpy(discounted_rewards.copy()).to(device)
+                    mean_reward += torch.mean(discounted_rewards)
                     inputs = torch.from_numpy(batch[SampleBatch.CUR_OBS]).to(device)
                     batch_dist: Categorical = Categorical(probs=model.selector(inputs))
                     actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
@@ -537,7 +539,8 @@ def add_regress_loss(
                     loss.backward()
                     mean_loss += loss.detach()
                     rl_optimizer.step()
-                    mean_loss /= len(full_batches)
+                mean_reward /= length_of_batches
+                mean_loss /= length_of_batches
                 model.selector.eval()
         if model.train_count == model.rl_update_interval - 1:
             model.train_count = 0
@@ -547,7 +550,9 @@ def add_regress_loss(
                 model.train_count += 1
         logging.debug(f"train function is called {model.train_count} times")
         logging.debug(f"RL Mean Loss: {mean_loss.item()}")
-    model.tower_stats['mean_pg_loss'] = mean_loss
+        logging.debug(f"RL Mean Reward: {mean_reward.item()}")
+        model.tower_stats['mean_pg_loss'] = mean_loss
+        model.tower_stats['mean_assign_reward'] = mean_reward
     model.train()
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
     model.eval()
@@ -560,24 +565,24 @@ def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewa
                              execute_rewards, start_indices):
     for emergency, emergency_start, emergency_end in (
             zip(allocated_emergencies, start_indices, end_indices)):
-        allocate_index = np.nonzero((emergency[0] == allocation_list[..., 0]) &
-                                    (emergency[1] == allocation_list[..., 1]) &
+        allocate_index = np.nonzero((emergency[0] == allocation_list[:, 0]) &
+                                    (emergency[1] == allocation_list[:, 1]) &
                                     (assign_rewards != -2))[0]
         delta = emergency_end - emergency_start
         # logging.debug(f"emergency_start: {emergency_start}, emergency_end: {emergency_end}")
-        if emergency_end % episode_length < episode_length - 1:
-            # logging.debug(f"detected end: {emergency_end % episode_length}")
-            trajectory_reward = execute_rewards[emergency_start:emergency_end]
-            surveillance_reward = np.sum(trajectory_reward - np.floor(trajectory_reward))
-            # Emergency cover reward consists of two parts, one is the emergency cover reward
-            # and the other is the distance discount factor. The closer to the emergency
-            # the higher the reward
-            discount_factor = (episode_length - delta) / episode_length
-            if execute_rewards[emergency_end] >= EMERGENCY_REWARD_INCREMENT:
-                emergency_cover_reward = EMERGENCY_REWARD_INCREMENT
-            else:
-                emergency_cover_reward = -1
-            assign_rewards[allocate_index] = discount_factor * (surveillance_reward + emergency_cover_reward)
+        # if emergency_end % episode_length < episode_length - 1:
+        # logging.debug(f"detected end: {emergency_end % episode_length}")
+        trajectory_reward = execute_rewards[emergency_start:emergency_end]
+        surveillance_reward = np.sum(trajectory_reward - np.floor(trajectory_reward))
+        # Emergency cover reward consists of two parts, one is the emergency cover reward
+        # and the other is the distance discount factor. The closer to the emergency
+        # the higher the reward
+        discount_factor = (episode_length - delta) / episode_length
+        if execute_rewards[emergency_end] >= EMERGENCY_REWARD_INCREMENT:
+            emergency_cover_reward = EMERGENCY_REWARD_INCREMENT
+        else:
+            emergency_cover_reward = -1
+        assign_rewards[allocate_index] = discount_factor * (surveillance_reward + emergency_cover_reward)
     # logging.debug(f"rewards for assignment agent: {assign_rewards}")
 
 
@@ -654,7 +659,7 @@ def increasing_intrinsic_relabeling(model, train_batch, virtual_obs):
             obs_to_be_relabeled[..., 20:22] = agent_position[-1]
             train_batch['intrinsic_rewards'][fragment] = calculate_intrinsic(
                 agent_position, emergency_position, torch.zeros(1, device=model.device),
-                fake=True, device=model.device, emergency_threshold=0).to(torch.float32).to(train_batch_device)
+                fake=True, emergency_threshold=0).to(torch.float32).to(train_batch_device)
             train_batch[SampleBatch.REWARDS][fragment] = (train_batch['original_rewards'][fragment] +
                                                           train_batch['intrinsic_rewards'][fragment])
             # additional complete bonus
@@ -687,6 +692,8 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
     for item in ['regress_loss', 'pg_loss']:
         original_dict[item] = torch.mean(torch.stack(policy.get_tower_stats("mean_" + item)))
     for model in policy.model_gpu_towers:
+        if model.selector_type == 'RL':
+            original_dict['assign_reward'] = torch.mean(torch.stack(policy.get_tower_stats("mean_assign_reward")))
         if model.last_emergency_mode is not None:
             for i in range(model.n_agents):
                 original_dict[f'agent_{i}_mode'] = model.last_emergency_mode[i]

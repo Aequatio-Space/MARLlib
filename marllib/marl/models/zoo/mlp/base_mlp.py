@@ -94,75 +94,6 @@ def argmax_to_mask(argmax_indices, num_classes=4, num_coords=2):
     return mask
 
 
-def process_env(i, env_obs, this_coverage, my_emergency_queue,
-                emergency_xy, n_agents, look_ahead, device, emergency_queue_length,
-                selector, last_rl_transitions):
-    offset = i * n_agents
-    valid_emergencies = this_coverage == 0
-    env_queues = [list(q) for q in my_emergency_queue[offset:offset + n_agents]]
-    agents_pos = env_obs[:, n_agents + 2: n_agents + 4]
-
-    if look_ahead:
-        for j, my_queue in enumerate(env_queues):
-            if len(my_queue) > 0:
-                agents_pos[j] = torch.from_numpy(emergency_xy[my_queue[-1]])
-                logging.debug("Replace agent position with emergency position")
-
-    agents_queue_len = torch.tensor([len(q) for q in env_queues]).unsqueeze(-1).to(device)
-    single_invalid_mask = agents_queue_len.squeeze(-1) >= emergency_queue_length
-
-    additional_emergencies = [item for sublist in env_queues for item in sublist]
-    logging.debug(f"Additional Emergencies to remove: {additional_emergencies}")
-    valid_emergencies[additional_emergencies] = False
-
-    emergencies = emergency_xy[valid_emergencies]
-    received_tasks = len(emergencies)
-
-    if received_tasks > 0:
-        logging.debug(f"Valid Emergencies: {emergencies}")
-        actual_emergency_indices = np.nonzero(valid_emergencies)[0]
-        obs_list, action_list, reward_list = [], [], []
-
-        for k, emergency in enumerate(emergencies):
-            if torch.all(single_invalid_mask):
-                logging.debug("All agents are full, no further assignment will be made")
-                break
-
-            selector_obs = torch.cat([agents_pos, agents_queue_len], dim=1).flatten()
-            final_obs = torch.cat([selector_obs, torch.from_numpy(emergency).to(device)])
-            final_obs = final_obs.unsqueeze(0)
-            obs_list.append(final_obs.cpu().numpy())
-
-            probs = selector(final_obs, single_invalid_mask)
-            logging.debug("Probs: {}".format(probs))
-
-            action_dists: Categorical = Categorical(probs=probs)
-            action = int(action_dists.sample().cpu().numpy())
-            action_list.append(action)
-
-            agent_id = offset + action
-            current_queue = my_emergency_queue[agent_id]
-
-            if len(current_queue) < emergency_queue_length:
-                current_queue.append(actual_emergency_indices[k])
-                agents_queue_len[action] += 1
-                single_invalid_mask[action] = agents_queue_len[action] >= emergency_queue_length
-                reward_list.append(-1)
-            else:
-                logging.debug(f"Agent {agent_id} is full, no assignment is made")
-                reward_list.append(-2)
-
-        if len(obs_list) > 0:
-            last_rl_transitions[i].append(
-                SampleBatch(
-                    {
-                        SampleBatch.REWARDS: np.array(reward_list),
-                        SampleBatch.OBS: np.stack(obs_list, axis=-1),
-                        SampleBatch.ACTIONS: np.array(action_list),
-                    }
-                )
-            )
-
 class Predictor(nn.Module):
     def __init__(self, input_dim=22, hidden_size=64, output_dim=1):
         super(Predictor, self).__init__()
@@ -532,9 +463,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
         self.emergency_queue = [deque() for _ in range(self.n_agents * self.num_envs)]
         # same mode, indices, target with "mock" for testing
-        # self.mock_emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
-        # self.mock_emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
-        # self.mock_emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
+        self.mock_emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
+        self.mock_emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
+        self.mock_emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
         # self.wait_time = torch.zeros((self.n_agents * self.num_envs), device=self.device, dtype=torch.int32)
         # self.collision_count = torch.zeros((self.n_agents * self.num_envs), device=self.device, dtype=torch.int32)
 
@@ -650,6 +581,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         #                        self.mock_emergency_mode, self.mock_emergency_target,
                         #                        self.mock_emergency_indices)
                         # assert torch.all(all_obs == old_reference)
+                        # assert np.all(self.emergency_mode == self.mock_emergency_mode)
+                        # assert np.all(self.emergency_indices == self.mock_emergency_indices)
+                        # assert np.all(self.emergency_target == self.mock_emergency_target)
                     else:
                         (query_batch, actual_emergency_indices, stop_index,
                          last_round_emergency_agents, allocation_agents) = (
@@ -721,6 +655,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                 else:
                                     allocation_agents = actual_emergency_indices = \
                                         selected_emergencies = np.array([-1], dtype=np.int32)
+                            else:
+                                selected_emergencies = np.array([], dtype=np.int32)
                         else:
                             outputs = np.array([-1], dtype=np.float32)
                             query_batch = np.full_like(all_obs[0].cpu().numpy(), -1)
@@ -742,9 +678,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                             self.emergency_feature_dim
                         )
                         all_obs = torch.from_numpy(all_obs).to(self.device)
-                        # assert np.all(self.emergency_mode == self.mock_emergency_mode)
-                        # assert np.all(self.emergency_indices == self.mock_emergency_indices)
-                        # assert np.all(self.emergency_target == self.mock_emergency_target)
                 input_dict['obs']['obs']['agents_state'] = all_obs
             logging.debug(f"Mode after obs: {self.emergency_mode[:self.n_agents]}")
             logging.debug(f"Agent Emergency Indices: {self.emergency_indices[:16]}")
@@ -841,6 +774,11 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     logging.debug(f"Emergency {my_queue[0]} is covered by agent {actual_agent_id}")
                     my_queue.popleft()
 
+        self.do_assignment(all_env_obs, emergency_xy, env_target_coverage, my_emergency_queue, n_agents)
+
+        self.output_assignment_result(all_obs, emergency_xy, my_emergency_queue)
+
+    def do_assignment(self, all_env_obs, emergency_xy, env_target_coverage, my_emergency_queue, n_agents):
         for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs, env_target_coverage)):
             offset = i * n_agents
             valid_emergencies = this_coverage == 0
@@ -888,25 +826,33 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         current_queue.append(actual_emergency_indices[k])
                         agents_queue_len[action] += 1
                         single_invalid_mask[action] = agents_queue_len[action] >= self.emergency_queue_length
-                        reward_list.append(-1)
+                        reward_list.append(-1.0)
                     else:
                         logging.debug(f"Agent {agent_id} is full, no assignment is made")
-                        reward_list.append(-2)
+                        reward_list.append(-2.0)
                 if len(obs_list) > 0:
                     self.last_rl_transitions[i].append(
                         SampleBatch(
                             {
-                                SampleBatch.REWARDS: np.array(reward_list),
+                                SampleBatch.REWARDS: np.array(reward_list, dtype=np.float32),
                                 SampleBatch.OBS: np.vstack(obs_list),
-                                SampleBatch.ACTIONS: np.array(action_list),
+                                SampleBatch.ACTIONS: np.array(action_list, dtype=np.int32),
                             }
                         )
                     )
 
+    def output_assignment_result(self, all_obs, emergency_xy, my_emergency_queue):
         for i, emergency_queue in enumerate(my_emergency_queue):
             if len(emergency_queue) > 0:
                 all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \
                     torch.from_numpy(emergency_xy[emergency_queue[0]])
+                self.emergency_indices[i] = emergency_queue[0]
+                self.emergency_target[i] = emergency_xy[emergency_queue[0]]
+                self.emergency_mode[i] = 1
+            else:
+                self.emergency_indices[i] = -1
+                self.emergency_target[i] = -1
+                self.emergency_mode[i] = 0
 
     def oracle_assignment(self, all_obs, emergency_xy, target_coverage,
                           emergency_mode, emergency_target, emergency_indices):
@@ -984,6 +930,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                     # assign emergency to this agent
                                     emergency_mode[agent_actual_index] = 1
                                     emergency_target[agent_actual_index] = valid_emergencies_xy[j]
+                                    emergency_indices[agent_actual_index] = actual_emergency_indices[j]
                                     logging.debug(f"Allocated Emergency for agent {agent_id} in env {i}: "
                                                   f"{valid_emergencies_xy[j]}")
                                     # fill in emergency target
