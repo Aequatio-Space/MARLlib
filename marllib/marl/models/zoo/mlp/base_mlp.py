@@ -5,8 +5,7 @@ import pprint
 from collections import deque
 from functools import reduce
 from typing import Tuple
-import concurrent.futures
-import multiprocessing
+
 import numpy as np
 import pandas as pd
 import wandb
@@ -24,6 +23,8 @@ from torch.distributions import Categorical
 
 from warp_drive.utils.common import get_project_root
 from warp_drive.utils.constants import Constants
+
+rendering_queue_feature = 3
 
 # Copyright (c) 2023 Replicable-MARL
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -341,6 +342,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         # decide the model arch
         self.assignment_sample_batches = []
         self.inputs = None
+        self.evaluate_count_down = self.eval_interval = 5
         self.custom_config = model_config["custom_model_config"]
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
@@ -358,12 +360,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.step_count = 0
         self.local_mode = self.model_arch_args['local_mode']
         self.render = self.model_arch_args['render']
-        if self.render:
-            self.render_file_name = self.model_arch_args['render_file_name']
-        else:
-            self.render_file_name = ""
-
-        # self.count = 0
+        self.render_file_name = self.model_arch_args['render_file_name']
         self._is_train = False
         self.with_task_allocation = self.custom_config["with_task_allocation"]
         self.separate_encoder = self.custom_config["separate_encoder"]
@@ -446,13 +443,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             # self.selector = RandomAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
             #     self.device)
         # Note, the final activation cannot be tanh, check.
-        if self.render:
-            # self.wait_time_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
-            self.emergency_mode_list = np.zeros([self.episode_length, self.n_agents], dtype=np.bool_)
-            self.emergency_target_list = np.zeros([self.episode_length, self.n_agents, 2], dtype=np.float32)
-            self.emergency_queue_list = np.zeros([self.episode_length, self.n_agents], dtype=np.int32)
-            # self.wait_time_list = torch.zeros([self.episode_length, self.n_agents], device=self.device)
-            # self.collision_count_list = torch.zeros([self.episode_length, self.n_agents])
+        self.emergency_mode_list = np.zeros([self.episode_length, self.n_agents], dtype=np.bool_)
+        self.emergency_target_list = np.zeros([self.episode_length, self.n_agents, 2], dtype=np.float32)
+        self.emergency_queue_list = np.full([self.episode_length, self.n_agents, self.emergency_queue_length],
+                                            dtype=np.int32, fill_value=-1)
         if wandb.run is not None:
             wandb.watch(models=tuple(self.actors), log='all')
 
@@ -463,9 +457,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
         self.emergency_queue = [deque() for _ in range(self.n_agents * self.num_envs)]
         # same mode, indices, target with "mock" for testing
-        self.mock_emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
-        self.mock_emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
-        self.mock_emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
+        # self.mock_emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
+        # self.mock_emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
+        # self.mock_emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
         # self.wait_time = torch.zeros((self.n_agents * self.num_envs), device=self.device, dtype=torch.int32)
         # self.collision_count = torch.zeros((self.n_agents * self.num_envs), device=self.device, dtype=torch.int32)
 
@@ -569,7 +563,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                        self.n_agents * (self.n_agents + 4):-1].reshape(-1, self.emergency_count,
                                                                                        4).cpu().numpy()
                     emergency_xy = np.stack((emergency_status[0][..., 0], emergency_status[0][..., 1]), axis=-1)
-                    target_coverage = emergency_status[..., 3]
+                    target_coverage = emergency_status[..., rendering_queue_feature]
                     if self.selector_type == 'oracle':
                         # split all_obs into [num_envs] of vectors
                         self.oracle_assignment(all_obs, emergency_xy, target_coverage,
@@ -683,34 +677,39 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             logging.debug(f"Agent Emergency Indices: {self.emergency_indices[:16]}")
             logging.debug(f"Emergency Queue: {self.emergency_queue[:16]}")
             logging.debug(f"Emergency Queue Length: {[len(q) for q in self.emergency_queue[:16]]}")
-            if self.render:
-                if self.selector_type == 'RL':
-                    for i, queue in enumerate(self.emergency_queue[:self.n_agents]):
-                        if len(queue) > 0:
-                            self.emergency_target_list[timestep][i] = queue[0]
-                        else:
-                            self.emergency_target_list[timestep][i] = -1
-                else:
-                    self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents]
+            if self.render or self.evaluate_count_down == 0:
+                self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents]
                 self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents]
-                self.emergency_queue_list[timestep] = [len(q) for q in self.emergency_queue[:self.n_agents]]
+                for i, q in enumerate(self.emergency_queue[:self.n_agents]):
+                    queue_length = len(q)
+                    self.emergency_queue_list[timestep][i, :queue_length] = q
+                    # access_indices = np.array([True, True, False] * queue_length + [False] * (
+                    #         self.emergency_queue_length - queue_length) * rendering_queue_feature)
             if timestep == self.episode_length - 1:
-                if self.render:
+                if self.render or self.evaluate_count_down == 0:
                     # WARNING: not modified for numpy.
                     # output all rendering information as csv
                     import pandas as pd
                     from datetime import datetime
                     # concatenate all rendering information
-                    all_rendering_info = np.concatenate(
-                        [self.emergency_mode_list,
-                         self.emergency_queue_list,
-                         self.emergency_target_list.reshape(self.episode_length, -1),
-                         ], axis=-1)
+                    final_table = np.concatenate(
+                        (self.emergency_mode_list[:, :, np.newaxis], self.emergency_target_list,
+                         self.emergency_queue_list), axis=-1)
+                    columns = []
+                    for a in range(self.n_agents):
+                        columns.extend([f'Agent_{a}_Mode', f'Agent_{a}_Target_X', f'Agent_{a}_Target_Y'] +
+                                       [f'Agent_{a}_Queue_{j}' for j in range(self.emergency_queue_length)])
                     # convert to pandas dataframe
-                    all_rendering_info = pd.DataFrame(all_rendering_info)
+                    all_rendering_info = pd.DataFrame(final_table.reshape(self.episode_length, -1), columns=columns)
                     # save to csv
                     datatime_str = datetime.now().strftime("%Y%m%d-%H%M%S")
-                    all_rendering_info.to_csv(f"{self.render_file_name}_{datatime_str}.csv")
+                    all_rendering_info.to_csv(f'{self.render_file_name}_{datatime_str}.csv')
+                    logging.debug(f"Detailed Assignment result saved to {self.render_file_name}_{datatime_str}.csv")
+                if self.evaluate_count_down <= 0:
+                    self.evaluate_count_down = self.eval_interval
+                else:
+                    self.evaluate_count_down -= 1
+                    logging.debug(f"Crowdsim Eval Countdown: {self.evaluate_count_down}")
                 self.step_count += self.episode_length * self.num_envs
             self.last_virtual_obs = input_dict['obs']['obs']['agents_state']
         else:
