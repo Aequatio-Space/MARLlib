@@ -561,9 +561,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     numpy_observations = all_obs.cpu().numpy()
                     emergency_status = input_dict['obs']['state'][Constants.VECTOR_STATE][...,
                                        self.n_agents * (self.n_agents + 4):-1].reshape(-1, self.emergency_count,
-                                                                                       4).cpu().numpy()
+                                                                                       5).cpu().numpy()
                     emergency_xy = np.stack((emergency_status[0][..., 0], emergency_status[0][..., 1]), axis=-1)
-                    target_coverage = emergency_status[..., rendering_queue_feature]
+                    target_coverage = emergency_status[..., 3]
                     if self.selector_type == 'oracle':
                         # split all_obs into [num_envs] of vectors
                         self.oracle_assignment(all_obs, emergency_xy, target_coverage,

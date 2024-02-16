@@ -35,6 +35,8 @@ ORIGINAL_REWARDS = 'original_rewards'
 
 EMERGENCY_REWARD_INCREMENT = 1.0
 
+emergency_feature_in_state = 5
+
 torch, nn = try_import_torch()
 
 logger = logging.getLogger(__name__)
@@ -121,8 +123,9 @@ def relabel_for_sample_batch(
     observation_dim = status_dim + emergency_dim + 100
     state_agents_dim = (num_agents + 4) * num_agents
     emergency_states = (observation[..., observation_dim + state_agents_dim:
-                                         state_agents_dim + observation_dim + this_emergency_count * 4])
-    emergency_states = emergency_states.reshape(-1, this_emergency_count, 4)
+                                         state_agents_dim + observation_dim +
+                                         this_emergency_count * emergency_feature_in_state])
+    emergency_states = emergency_states.reshape(-1, this_emergency_count, emergency_feature_in_state)
     agents_position = observation[..., num_agents + 2: num_agents + 4]
     if use_intrinsic:
         emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
@@ -370,7 +373,8 @@ def compute_gae_and_intrinsic_for_sample_batch(
         emergency_position = sample_batch[VIRTUAL_OBS][..., status_dim:status_dim + emergency_dim]
     except KeyError:
         emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
-    emergency_states = sample_batch[SampleBatch.OBS][..., 154:190].reshape(-1, policy.model.emergency_count, 4)
+    emergency_states = sample_batch[SampleBatch.OBS][..., 154:190].reshape(-1, policy.model.emergency_count,
+                                                                           emergency_feature_in_state)
     modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, sample_batch)
     return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
 
@@ -427,13 +431,15 @@ def match_aoi(all_emergencies_position: np.ndarray,
     return indices
 
 
-def add_regress_loss(
+def add_auxiliary_loss(
         policy: TorchPolicy, model: ModelV2,
         dist_class: Type[TorchDistributionWrapper],
         train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
     logging.debug("add_regress_loss is called")
     status_dim = policy.model.status_dim
     device = model.device
+    num_agents = policy.model.n_agents
+    this_emergency_count = policy.model.emergency_count
     emergency_dim = policy.model.emergency_feature_dim
     if hasattr(model, "selector_type") and model.selector_type == 'NN':
         batch_size = 32
@@ -495,6 +501,13 @@ def add_regress_loss(
                 episode_length = policy.model.episode_length
                 # print("Number of batches: ", len(lower_agent_batches))
                 for i, lower_agent_batch in enumerate(lower_agent_batches):
+                    observation = lower_agent_batch[SampleBatch.OBS]
+                    observation_dim = status_dim + emergency_dim + 100
+                    state_agents_dim = (num_agents + 4) * num_agents
+                    emergency_states = (observation[..., observation_dim + state_agents_dim:
+                                                         state_agents_dim + observation_dim +
+                                                         this_emergency_count * emergency_feature_in_state])
+                    emergency_states = emergency_states.reshape(-1, this_emergency_count, emergency_feature_in_state)
                     assign_rewards = full_batches[i][SampleBatch.REWARDS]
                     try:
                         execute_rewards = lower_agent_batch['original_rewards']
@@ -518,7 +531,8 @@ def add_regress_loss(
                     logging.debug(f"Allocated emergencies: {len(allocated_emergencies)}")
                     assert len(start_indices) == len(end_indices) == len(allocated_emergencies)
                     calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewards, end_indices,
-                                             episode_length, execute_rewards, start_indices)
+                                             episode_length, execute_rewards, start_indices, emergency_states,
+                                             full_batches[i][SampleBatch.ACTIONS])
                     full_batches[i][SampleBatch.REWARDS] = assign_rewards
                 mean_loss = torch.tensor(0.0).to(device)
                 # progress = tqdm(full_batches)
@@ -562,8 +576,10 @@ def add_regress_loss(
 
 # @njit
 def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewards, end_indices, episode_length,
-                             execute_rewards, start_indices):
-    for emergency, emergency_start, emergency_end in (
+                             execute_rewards, start_indices, emergency_states, actions):
+    assignment_status = emergency_states[..., 4][-1]
+    emergency_xy = emergency_states[..., 0:2][-1]
+    for i, (emergency, emergency_start, emergency_end) in enumerate(
             zip(allocated_emergencies, start_indices, end_indices)):
         allocate_index = np.nonzero((emergency[0] == allocation_list[:, 0]) &
                                     (emergency[1] == allocation_list[:, 1]) &
@@ -578,7 +594,10 @@ def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewa
         # and the other is the distance discount factor. The closer to the emergency
         # the higher the reward
         discount_factor = (episode_length - delta) / episode_length
-        if execute_rewards[emergency_end] >= EMERGENCY_REWARD_INCREMENT:
+        emergency_index = np.nonzero((emergency[0] == emergency_xy[:, 0]) &
+                                     (emergency[1] == emergency_xy[:, 1]))[0]
+        assert len(emergency_index) == 1
+        if assignment_status[emergency_index] == actions[i]:
             emergency_cover_reward = EMERGENCY_REWARD_INCREMENT
         else:
             emergency_cover_reward = -1
@@ -663,7 +682,7 @@ def increasing_intrinsic_relabeling(model, train_batch, virtual_obs):
             train_batch[SampleBatch.REWARDS][fragment] = (train_batch['original_rewards'][fragment] +
                                                           train_batch['intrinsic_rewards'][fragment])
             # additional complete bonus
-            train_batch[SampleBatch.REWARDS][fragment[-1]] += len(fragment) * 5 / episode_length
+            train_batch[SampleBatch.REWARDS][fragment[-1]] += len(fragment) * 6 / episode_length
             train_batch[VIRTUAL_OBS][fragment] = obs_to_be_relabeled
         # for successful trajectories, the aoi is not 100% correct (smaller than actual), check if needed.
         predictor_inputs.append(obs_to_be_relabeled[0])
@@ -689,11 +708,12 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
     """
     original_dict = kl_and_loss_stats(policy, train_batch)
     #  'label_count', 'valid_fragment_length', 'relabel_percentage'
-    for item in ['regress_loss', 'pg_loss']:
+    for item in ['regress_loss']:
         original_dict[item] = torch.mean(torch.stack(policy.get_tower_stats("mean_" + item)))
     for model in policy.model_gpu_towers:
         if model.selector_type == 'RL':
             original_dict['assign_reward'] = torch.mean(torch.stack(policy.get_tower_stats("mean_assign_reward")))
+            original_dict['rl_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_pg_loss")))
         if model.last_emergency_mode is not None:
             for i in range(model.n_agents):
                 original_dict[f'agent_{i}_mode'] = model.last_emergency_mode[i]
@@ -759,7 +779,7 @@ TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
     name="TrafficPPOTorchPolicy",
     get_default_config=lambda: PPO_CONFIG,
     postprocess_fn=relabel_for_sample_batch,
-    loss_fn=add_regress_loss,
+    loss_fn=add_auxiliary_loss,
     extra_action_out_fn=extra_action_out_fn,
     stats_fn=kl_and_loss_stats_with_regress,
     _after_loss_init=after_loss_init,
