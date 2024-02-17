@@ -370,12 +370,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_threshold = self.model_arch_args['emergency_threshold']
         self.tolerance = self.model_arch_args['tolerance']
         self.dataset_name = self.model_arch_args['dataset']
+        self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
+        self.emergency_dim = self.emergency_feature_dim * self.emergency_queue_length
         self.rl_update_interval = max(1, self.num_envs // 10)
         self.train_count = 0
         self.look_ahead = True
-        # self.emergency_queue_length = 5
-        self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
         emergency_path_name = os.path.join(get_project_root(), 'datasets',
                                            self.dataset_name, 'emergency_time_loc_0900_0930.csv')
         if os.path.exists(emergency_path_name):
@@ -761,7 +761,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                               "No allocation is made")
 
     def rl_assignment(self, all_obs, emergency_xy, target_coverage, my_emergency_queue, n_agents):
-        all_env_obs = all_obs.clone().detach().reshape(-1, n_agents, self.status_dim + self.emergency_feature_dim)
+        all_env_obs = all_obs.clone().detach().reshape(-1, n_agents, self.status_dim + self.emergency_dim)
         env_target_coverage = target_coverage[::n_agents]
         for i, this_coverage in enumerate(env_target_coverage):
             covered_emergency = this_coverage == 1
@@ -845,8 +845,11 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 self.emergency_indices[i] = emergency_queue[0]
                 self.emergency_target[i] = new_emergency_xy
                 self.emergency_mode[i] = 1
-                all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \
-                    torch.from_numpy(new_emergency_xy)
+                queue_obs = torch.zeros(self.emergency_dim, dtype=torch.float32)
+                for j, emergency in enumerate(emergency_queue):
+                    queue_obs[j * self.emergency_feature_dim:(j + 1) * self.emergency_feature_dim] = \
+                        torch.from_numpy(emergency_xy[emergency])
+                all_obs[i][self.status_dim:self.status_dim + self.emergency_dim] = queue_obs
             else:
                 self.emergency_indices[i] = -1
                 self.emergency_target[i] = -1

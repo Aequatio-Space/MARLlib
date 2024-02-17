@@ -108,6 +108,8 @@ def relabel_for_sample_batch(
     # logging.debug("step_count: %d, switch_step: %d", policy.model.step_count, policy.model.switch_step)
     status_dim = policy.model.status_dim
     emergency_dim = policy.model.emergency_feature_dim
+    if selector_type == 'RL':
+        emergency_dim *= policy.model.emergency_queue_length
     # postprocess of rewards
     num_agents = policy.model.n_agents
     # postprocess extra_batches
@@ -128,7 +130,11 @@ def relabel_for_sample_batch(
     emergency_states = emergency_states.reshape(-1, this_emergency_count, emergency_feature_in_state)
     agents_position = observation[..., num_agents + 2: num_agents + 4]
     if use_intrinsic:
-        emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+        if selector_type == 'RL':
+            emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:
+                                                                    status_dim + policy.model.emergency_feature_dim]
+        else:
+            emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
         if use_distance_intrinsic:
             intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
                                             emergency_threshold=policy.model.emergency_threshold)
@@ -441,6 +447,8 @@ def add_auxiliary_loss(
     num_agents = policy.model.n_agents
     this_emergency_count = policy.model.emergency_count
     emergency_dim = policy.model.emergency_feature_dim
+    if policy.model.selector_type == 'RL':
+        emergency_dim *= policy.model.emergency_queue_length
     if hasattr(model, "selector_type") and model.selector_type == 'NN':
         batch_size = 32
         learning_rate = 0.001 if model.render is False else 0
