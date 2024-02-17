@@ -436,10 +436,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             input_dim = self.full_obs_space['obs']['agents_state'].shape[0]
             self.selector = Predictor(input_dim).to(self.device)
         elif self.selector_type == 'RL':
-            self.selector = AgentSelector(self.n_agents * 3 + 2, 64, self.n_agents).to(
-                self.device)
-            # self.selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
+            # self.selector = AgentSelector(self.n_agents * 3 + 2, 64, self.n_agents).to(
             #     self.device)
+            self.selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
+                self.device)
             # self.selector = RandomAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
             #     self.device)
         # Note, the final activation cannot be tanh, check.
@@ -825,10 +825,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         current_queue.append(actual_emergency_indices[k])
                         agents_queue_len[action] += 1
                         single_invalid_mask[action] = agents_queue_len[action] >= self.emergency_queue_length
+                        agents_pos[action] = torch.from_numpy(emergency)
                         reward_list.append(-1.0)
-                    else:
-                        logging.debug(f"Agent {agent_id} is full, no assignment is made")
-                        reward_list.append(-2.0)
                 if len(obs_list) > 0:
                     self.last_rl_transitions[i].append(
                         SampleBatch(
@@ -843,11 +841,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
     def output_assignment_result(self, all_obs, emergency_xy, my_emergency_queue):
         for i, emergency_queue in enumerate(my_emergency_queue):
             if len(emergency_queue) > 0:
-                all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \
-                    torch.from_numpy(emergency_xy[emergency_queue[0]])
+                new_emergency_xy = emergency_xy[emergency_queue[0]]
                 self.emergency_indices[i] = emergency_queue[0]
-                self.emergency_target[i] = emergency_xy[emergency_queue[0]]
+                self.emergency_target[i] = new_emergency_xy
                 self.emergency_mode[i] = 1
+                all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \
+                    torch.from_numpy(new_emergency_xy)
             else:
                 self.emergency_indices[i] = -1
                 self.emergency_target[i] = -1

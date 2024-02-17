@@ -435,7 +435,7 @@ def add_auxiliary_loss(
         policy: TorchPolicy, model: ModelV2,
         dist_class: Type[TorchDistributionWrapper],
         train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
-    logging.debug("add_regress_loss is called")
+    logging.debug("add_auxiliary_loss is called")
     status_dim = policy.model.status_dim
     device = model.device
     num_agents = policy.model.n_agents
@@ -508,32 +508,11 @@ def add_auxiliary_loss(
                                                          state_agents_dim + observation_dim +
                                                          this_emergency_count * emergency_feature_in_state])
                     emergency_states = emergency_states.reshape(-1, this_emergency_count, emergency_feature_in_state)
-                    assign_rewards = full_batches[i][SampleBatch.REWARDS]
-                    try:
-                        execute_rewards = lower_agent_batch['original_rewards']
-                    except KeyError:
-                        execute_rewards = lower_agent_batch[ORIGINAL_REWARDS].cpu().numpy()
-                    if isinstance(execute_rewards, torch.Tensor):
-                        execute_rewards = execute_rewards.cpu().numpy()
-                    allocation_list = full_batches[i][SampleBatch.OBS][..., -2:]
-                    emergency_obs = lower_agent_batch[SampleBatch.OBS][...,
-                                    status_dim:status_dim + emergency_dim]
-                    if isinstance(emergency_obs, torch.Tensor):
-                        emergency_obs = emergency_obs.cpu().numpy()
-                    # Determine start and end indices
-                    start_indices, end_indices = get_emergency_start_end_standard(emergency_obs)
-                    # mock_end, mock_start, _ = get_emergency_start_end(emergency_obs)
-                    # assert np.all(mock_end == end_indices) and np.all(mock_start == start_indices)
-                    # test this function on different dataset
-                    allocated_emergencies = emergency_obs[start_indices]
-                    # Exclude rows with all zeros
-                    logging.debug(f"start_indices: {len(start_indices)}, end_indices: {len(end_indices)}")
-                    logging.debug(f"Allocated emergencies: {len(allocated_emergencies)}")
-                    assert len(start_indices) == len(end_indices) == len(allocated_emergencies)
-                    calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewards, end_indices,
-                                             episode_length, execute_rewards, start_indices, emergency_states,
-                                             full_batches[i][SampleBatch.ACTIONS])
-                    full_batches[i][SampleBatch.REWARDS] = assign_rewards
+                    calculate_assign_rewards_lite(full_batches[i][SampleBatch.CUR_OBS],
+                                                  full_batches[i][SampleBatch.REWARDS],
+                                                  full_batches[i][SampleBatch.ACTIONS],
+                                                  emergency_states,
+                                                  policy.model.n_agents)
                 mean_loss = torch.tensor(0.0).to(device)
                 # progress = tqdm(full_batches)
                 for batch in full_batches:
@@ -604,6 +583,24 @@ def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewa
         assign_rewards[allocate_index] = discount_factor * (surveillance_reward + emergency_cover_reward)
     # logging.debug(f"rewards for assignment agent: {assign_rewards}")
 
+
+def calculate_assign_rewards_lite(assign_obs, assign_rewards, actions, emergency_states, n_agents):
+    allocation_list = assign_obs[..., -2:]
+    agents_pos = assign_obs[..., :-2].reshape(-1, n_agents, 3)[..., 0:2]
+    aoi_status, assignment_status = emergency_states[..., 2][-1], emergency_states[..., 4][-1]
+    emergency_xy = emergency_states[..., 0:2][-1]
+    for i, (action, emergency) in enumerate(zip(actions, allocation_list)):
+        emergency_index = np.nonzero((emergency[0] == emergency_xy[:, 0]) &
+                                     (emergency[1] == emergency_xy[:, 1]))[0]
+        assert len(emergency_index) == 1
+        if assignment_status[emergency_index] == action:
+            delta = aoi_status[emergency_index]
+            discount_factor = (episode_length - delta) / episode_length
+            emergency_cover_reward = EMERGENCY_REWARD_INCREMENT * discount_factor
+        else:
+            distance_factor = np.linalg.norm(agents_pos[i][action] - emergency)
+            emergency_cover_reward = -1 * distance_factor
+        assign_rewards[i] = emergency_cover_reward
 
 def add_regress_loss_old(
         policy: Policy, model: ModelV2,
