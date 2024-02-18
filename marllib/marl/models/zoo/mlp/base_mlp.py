@@ -370,12 +370,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_threshold = self.model_arch_args['emergency_threshold']
         self.tolerance = self.model_arch_args['tolerance']
         self.dataset_name = self.model_arch_args['dataset']
-        self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
-        self.emergency_dim = self.emergency_feature_dim * self.emergency_queue_length
         self.rl_update_interval = max(1, self.num_envs // 10)
         self.train_count = 0
         self.look_ahead = True
+        # self.emergency_queue_length = 5
+        self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
         emergency_path_name = os.path.join(get_project_root(), 'datasets',
                                            self.dataset_name, 'emergency_time_loc_0900_0930.csv')
         if os.path.exists(emergency_path_name):
@@ -436,17 +436,20 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             input_dim = self.full_obs_space['obs']['agents_state'].shape[0]
             self.selector = Predictor(input_dim).to(self.device)
         elif self.selector_type == 'RL':
-            # self.selector = AgentSelector(self.n_agents * 3 + 2, 64, self.n_agents).to(
-            #     self.device)
-            self.selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
+            self.selector = AgentSelector(self.n_agents * 3 + 2, 64, self.n_agents).to(
                 self.device)
+            # self.selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
+            #     self.device)
             # self.selector = RandomAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
             #     self.device)
         # Note, the final activation cannot be tanh, check.
         self.emergency_mode_list = np.zeros([self.episode_length, self.n_agents], dtype=np.bool_)
         self.emergency_target_list = np.zeros([self.episode_length, self.n_agents, 2], dtype=np.float32)
-        self.emergency_queue_list = np.full([self.episode_length, self.n_agents, self.emergency_queue_length],
-                                            dtype=np.int32, fill_value=-1)
+        self.emergency_feature_in_queue = 3
+        self.emergency_queue_list = np.full([self.episode_length,
+                                             self.n_agents,
+                                             self.emergency_queue_length * self.emergency_feature_in_queue],
+                                            dtype=np.float32, fill_value=-1.0)
         if wandb.run is not None:
             wandb.watch(models=tuple(self.actors), log='all')
 
@@ -546,6 +549,13 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
 
     def query_and_assign(self, flat_inputs, input_dict):
         if not self._is_train:
+            all_obs = flat_inputs[Constants.VECTOR_STATE]
+            numpy_observations = all_obs.cpu().numpy()
+            emergency_status = input_dict['obs']['state'][Constants.VECTOR_STATE][...,
+                               self.n_agents * (self.n_agents + 4):-1].reshape(-1, self.emergency_count,
+                                                                               5).cpu().numpy()
+            emergency_xy = np.stack((emergency_status[0][..., 0], emergency_status[0][..., 1]), axis=-1)
+            target_coverage = emergency_status[..., 3]
             timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0].to(torch.int32)
             logging.debug("NN logged timestep: {}".format(timestep))
             if timestep == 0:
@@ -555,15 +565,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 # reset network mode
                 self.reset_states()
             else:
-                all_obs = flat_inputs[Constants.VECTOR_STATE]
                 # logging.debug(f"Mode before obs: {self.emergency_mode.cpu().numpy()}")
                 if torch.sum(all_obs) > 0:
-                    numpy_observations = all_obs.cpu().numpy()
-                    emergency_status = input_dict['obs']['state'][Constants.VECTOR_STATE][...,
-                                       self.n_agents * (self.n_agents + 4):-1].reshape(-1, self.emergency_count,
-                                                                                       5).cpu().numpy()
-                    emergency_xy = np.stack((emergency_status[0][..., 0], emergency_status[0][..., 1]), axis=-1)
-                    target_coverage = emergency_status[..., 3]
                     if self.selector_type == 'oracle':
                         # split all_obs into [num_envs] of vectors
                         self.oracle_assignment(all_obs, emergency_xy, target_coverage,
@@ -681,10 +684,14 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents]
                 self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents]
                 for i, q in enumerate(self.emergency_queue[:self.n_agents]):
+                    # construct a 2d ndarray from queue, the first dim is queue_length
+                    # the second dim is (x,y,index) respectively
                     queue_length = len(q)
-                    self.emergency_queue_list[timestep][i, :queue_length] = q
-                    # access_indices = np.array([True, True, False] * queue_length + [False] * (
-                    #         self.emergency_queue_length - queue_length) * rendering_queue_feature)
+                    if queue_length > 0:
+                        emergencies_in_queue = emergency_xy[q]
+                        render_result = np.hstack((emergencies_in_queue, np.array(q)[:, np.newaxis]))
+                        self.emergency_queue_list[timestep][i, :queue_length *
+                                                                self.emergency_feature_in_queue] = render_result.ravel()
             if timestep == self.episode_length - 1:
                 if self.render or self.evaluate_count_down == 0:
                     # WARNING: not modified for numpy.
@@ -698,13 +705,16 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     columns = []
                     for a in range(self.n_agents):
                         columns.extend([f'Agent_{a}_Mode', f'Agent_{a}_Target_X', f'Agent_{a}_Target_Y'] +
-                                       [f'Agent_{a}_Queue_{j}' for j in range(self.emergency_queue_length)])
+                                       [f'Agent_{a}_Queue_{j}_{b}' for b in ['X', 'Y', 'Index']
+                                        for j in range(self.emergency_queue_length)])
                     # convert to pandas dataframe
                     all_rendering_info = pd.DataFrame(final_table.reshape(self.episode_length, -1), columns=columns)
                     # save to csv
                     datatime_str = datetime.now().strftime("%Y%m%d-%H%M%S")
                     all_rendering_info.to_csv(f'{self.render_file_name}_{datatime_str}.csv')
                     logging.debug(f"Detailed Assignment result saved to {self.render_file_name}_{datatime_str}.csv")
+                    # reset emergency_queue_list
+                    self.emergency_queue_list.fill(-1.0)
                 if self.evaluate_count_down <= 0:
                     self.evaluate_count_down = self.eval_interval
                 else:
@@ -761,7 +771,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                               "No allocation is made")
 
     def rl_assignment(self, all_obs, emergency_xy, target_coverage, my_emergency_queue, n_agents):
-        all_env_obs = all_obs.clone().detach().reshape(-1, n_agents, self.status_dim + self.emergency_dim)
+        all_env_obs = all_obs.clone().detach().reshape(-1, n_agents, self.status_dim + self.emergency_feature_dim)
         env_target_coverage = target_coverage[::n_agents]
         for i, this_coverage in enumerate(env_target_coverage):
             covered_emergency = this_coverage == 1
@@ -845,14 +855,11 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 self.emergency_indices[i] = emergency_queue[0]
                 self.emergency_target[i] = new_emergency_xy
                 self.emergency_mode[i] = 1
-                queue_obs = torch.zeros(self.emergency_dim, dtype=torch.float32)
-                for j, emergency in enumerate(emergency_queue):
-                    queue_obs[j * self.emergency_feature_dim:(j + 1) * self.emergency_feature_dim] = \
-                        torch.from_numpy(emergency_xy[emergency])
-                all_obs[i][self.status_dim:self.status_dim + self.emergency_dim] = queue_obs
+                all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \
+                    torch.from_numpy(new_emergency_xy)
             else:
                 self.emergency_indices[i] = -1
-                self.emergency_target[i] = -1
+                self.emergency_target[i].fill(-1)
                 self.emergency_mode[i] = 0
 
     def oracle_assignment(self, all_obs, emergency_xy, target_coverage,
