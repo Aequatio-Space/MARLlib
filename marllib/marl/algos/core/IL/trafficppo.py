@@ -508,15 +508,20 @@ def add_auxiliary_loss(
                                                          state_agents_dim + observation_dim +
                                                          this_emergency_count * emergency_feature_in_state])
                     emergency_states = emergency_states.reshape(-1, this_emergency_count, emergency_feature_in_state)
+                    if 'original_rewards' in lower_agent_batch:
+                        lower_level_rewards = lower_agent_batch['original_rewards']
+                    else:
+                        lower_level_rewards = lower_agent_batch[SampleBatch.REWARDS]
                     calculate_assign_rewards_lite(full_batches[i][SampleBatch.CUR_OBS],
                                                   full_batches[i][SampleBatch.REWARDS],
                                                   full_batches[i][SampleBatch.ACTIONS],
                                                   emergency_states,
-                                                  policy.model.n_agents)
+                                                  lower_agent_batch[SampleBatch.OBS],
+                                                  lower_level_rewards)
                 mean_loss = torch.tensor(0.0).to(device)
                 # progress = tqdm(full_batches)
                 for batch in full_batches:
-                    discounted_rewards = batch[SampleBatch.REWARDS]
+                    discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0.3)
                     # normalize rewards
                     # discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
                     #         discounted_rewards.std() + 1e-8)
@@ -544,7 +549,7 @@ def add_auxiliary_loss(
         logging.debug(f"train function is called {model.train_count} times")
         logging.debug(f"RL Mean Loss: {mean_loss.item()}")
         logging.debug(f"RL Mean Reward: {mean_reward.item()}")
-        model.tower_stats['mean_pg_loss'] = mean_loss
+        model.tower_stats['mean_rl_loss'] = mean_loss
         model.tower_stats['mean_assign_reward'] = mean_reward
     model.train()
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
@@ -584,22 +589,31 @@ def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewa
     # logging.debug(f"rewards for assignment agent: {assign_rewards}")
 
 
-def calculate_assign_rewards_lite(assign_obs, assign_rewards, actions, emergency_states, n_agents):
+def calculate_assign_rewards_lite(assign_obs, assign_rewards, actions, emergency_states,
+                                  lower_level_obs, lower_level_reward):
     allocation_list = assign_obs[..., -2:]
-    agents_pos = assign_obs[..., :-2].reshape(-1, n_agents, 3)[..., 0:2]
     aoi_status, assignment_status = emergency_states[..., 2][-1], emergency_states[..., 4][-1]
     emergency_xy = emergency_states[..., 0:2][-1]
+    emergency_in_lower_level_obs = lower_level_obs[..., 20:22]
+    start_indices, end_indices = get_emergency_start_end_numba(emergency_in_lower_level_obs)
+    selected_emergencies = emergency_in_lower_level_obs[start_indices]
     for i, (action, emergency) in enumerate(zip(actions, allocation_list)):
         emergency_index = np.nonzero((emergency[0] == emergency_xy[:, 0]) &
                                      (emergency[1] == emergency_xy[:, 1]))[0]
-        assert len(emergency_index) == 1
+        lower_level_index = np.nonzero((emergency[0] == selected_emergencies[:, 0]) &
+                                       (emergency[1] == selected_emergencies[:, 1]))[0]
+        assert len(emergency_index) == len(lower_level_index) == 1
+        lower_level_index = lower_level_index[0]
         if assignment_status[emergency_index] == action:
-            delta = aoi_status[emergency_index]
+            delta = end_indices[lower_level_index] - start_indices[lower_level_index] - 1
             discount_factor = (episode_length - delta) / episode_length
-            emergency_cover_reward = EMERGENCY_REWARD_INCREMENT * discount_factor
+            surveillence_reward = np.sum(lower_level_reward[start_indices[lower_level_index]:
+                                                            end_indices[lower_level_index]])
+            emergency_cover_reward = (EMERGENCY_REWARD_INCREMENT + surveillence_reward) * discount_factor
         else:
-            distance_factor = np.linalg.norm(agents_pos[i][action] - emergency)
-            emergency_cover_reward = -1 * distance_factor
+            emergency_cover_reward = -1.0
+            # distance_factor = np.linalg.norm(agents_pos[i][action] - emergency)
+            # emergency_cover_reward = -1 * distance_factor
         assign_rewards[i] = emergency_cover_reward
 
 def add_regress_loss_old(
@@ -710,7 +724,7 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
     for model in policy.model_gpu_towers:
         if model.selector_type == 'RL':
             original_dict['assign_reward'] = torch.mean(torch.stack(policy.get_tower_stats("mean_assign_reward")))
-            original_dict['rl_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_pg_loss")))
+            original_dict['rl_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_rl_loss")))
         if model.last_emergency_mode is not None:
             for i in range(model.n_agents):
                 original_dict[f'agent_{i}_mode'] = model.last_emergency_mode[i]
@@ -796,7 +810,7 @@ TrafficPPOTrainer = WandbPPOTrainer.with_updates(
 
 
 @njit
-def get_emergency_start_end_standard(emergency_obs: np.ndarray):
+def get_emergency_start_end_numba(emergency_obs: np.ndarray):
     start_indices, end_indices = [], []
     length = len(emergency_obs)
     i = 0
