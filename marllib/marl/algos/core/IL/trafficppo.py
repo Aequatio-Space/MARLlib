@@ -525,7 +525,8 @@ def add_auxiliary_loss(
                     # normalize rewards
                     # discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
                     #         discounted_rewards.std() + 1e-8)
-                    discounted_rewards = torch.from_numpy(discounted_rewards).to(device)
+                    # do not delete the copy(), discount_cumsum reverse the step for array.
+                    discounted_rewards = torch.from_numpy(discounted_rewards.copy()).to(device)
                     mean_reward += torch.mean(discounted_rewards)
                     inputs = torch.from_numpy(batch[SampleBatch.CUR_OBS]).to(device)
                     batch_dist: Categorical = Categorical(probs=model.selector(inputs))
@@ -595,6 +596,10 @@ def calculate_assign_rewards_lite(assign_obs, assign_rewards, actions, emergency
     aoi_status, assignment_status = emergency_states[..., 2][-1], emergency_states[..., 4][-1]
     emergency_xy = emergency_states[..., 0:2][-1]
     emergency_in_lower_level_obs = lower_level_obs[..., 20:22]
+    if isinstance(emergency_in_lower_level_obs, torch.Tensor):
+        emergency_in_lower_level_obs = emergency_in_lower_level_obs.cpu().numpy()
+    if isinstance(lower_level_reward, torch.Tensor):
+        lower_level_reward = lower_level_reward.cpu().numpy()
     start_indices, end_indices = get_emergency_start_end_numba(emergency_in_lower_level_obs)
     selected_emergencies = emergency_in_lower_level_obs[start_indices]
     for i, (action, emergency) in enumerate(zip(actions, allocation_list)):
@@ -602,18 +607,24 @@ def calculate_assign_rewards_lite(assign_obs, assign_rewards, actions, emergency
                                      (emergency[1] == emergency_xy[:, 1]))[0]
         lower_level_index = np.nonzero((emergency[0] == selected_emergencies[:, 0]) &
                                        (emergency[1] == selected_emergencies[:, 1]))[0]
-        assert len(emergency_index) == len(lower_level_index) == 1
-        lower_level_index = lower_level_index[0]
-        if assignment_status[emergency_index] == action:
-            delta = end_indices[lower_level_index] - start_indices[lower_level_index] - 1
-            discount_factor = (episode_length - delta) / episode_length
-            surveillence_reward = np.sum(lower_level_reward[start_indices[lower_level_index]:
-                                                            end_indices[lower_level_index]])
-            emergency_cover_reward = (EMERGENCY_REWARD_INCREMENT + surveillence_reward) * discount_factor
-        else:
+        if len(lower_level_index) == 0:
             emergency_cover_reward = -1.0
-            # distance_factor = np.linalg.norm(agents_pos[i][action] - emergency)
-            # emergency_cover_reward = -1 * distance_factor
+        else:
+            logging.debug(f"length of lower_level_index: {len(lower_level_index)}")
+            logging.debug(f"length of emergency_index: {len(emergency_index)}")
+            logging.debug(selected_emergencies)
+            assert len(emergency_index) == len(lower_level_index) == 1
+            lower_level_index = lower_level_index[0]
+            if assignment_status[emergency_index] == action:
+                delta = end_indices[lower_level_index] - start_indices[lower_level_index] - 1
+                discount_factor = (episode_length - delta) / episode_length
+                surveillence_reward = np.sum(lower_level_reward[start_indices[lower_level_index]:
+                                                                end_indices[lower_level_index]])
+                emergency_cover_reward = (EMERGENCY_REWARD_INCREMENT + surveillence_reward) * discount_factor
+            else:
+                emergency_cover_reward = -1.0
+                # distance_factor = np.linalg.norm(agents_pos[i][action] - emergency)
+                # emergency_cover_reward = -1 * distance_factor
         assign_rewards[i] = emergency_cover_reward
 
 def add_regress_loss_old(
