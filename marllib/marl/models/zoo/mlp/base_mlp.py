@@ -354,14 +354,14 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.device = torch.device("cpu")
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.selector_type = (self.model_arch_args['selector_type'] or
-                              self.custom_config["selector_type"])
+        self.selector_type = (self.model_arch_args['selector_type'] or self.custom_config["selector_type"])
         self.episode_length = 120
         self.switch_step = self.model_arch_args['switch_step']
         self.step_count = 0
         self.local_mode = self.model_arch_args['local_mode']
         self.render = self.model_arch_args['render']
         self.render_file_name = self.model_arch_args['render_file_name']
+        self.rl_gamma = self.model_arch_args['rl_gamma']
         self._is_train = False
         self.with_task_allocation = self.custom_config["with_task_allocation"]
         self.separate_encoder = self.custom_config["separate_encoder"]
@@ -435,20 +435,30 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.critics = [self.vf_encoder, self.vf_branch]
 
         self.actor_initialized_parameters = self.actor_parameters()
-        if self.selector_type == "greedy":
-            self.selector = GreedySelector(self.n_agents, num_outputs)
-        elif self.selector_type == 'random':
-            self.selector = RandomSelector(self.n_agents, num_outputs)
-        elif self.selector_type == 'NN':
-            input_dim = self.full_obs_space['obs']['agents_state'].shape[0]
-            self.selector = Predictor(input_dim).to(self.device)
-        elif self.selector_type == 'RL':
-            self.selector = AgentSelector(self.n_agents * 3 + 2, 64, self.n_agents).to(
-                self.device)
-            # self.selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
-            #     self.device)
-            # self.selector = RandomAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
-            #     self.device)
+        if len(self.selector_type) == 1:
+            mode = self.selector_type[0]
+            if mode == "greedy":
+                self.selector = GreedySelector(self.n_agents, num_outputs)
+            elif mode == 'random':
+                self.selector = RandomSelector(self.n_agents, num_outputs)
+            elif mode == 'NN':
+                input_dim = self.full_obs_space['obs']['agents_state'].shape[0]
+                self.selector = Predictor(input_dim).to(self.device)
+            elif mode == 'RL':
+                self.selector = AgentSelector(self.n_agents * 3 + 2, 64, self.n_agents).to(
+                    self.device)
+            else:
+                raise ValueError(f"Unknown selector type {self.selector_type}")
+        elif len(self.selector_type) == 2:
+            assert 'RL' in self.selector_type or 'NN' in self.selector_type
+            if 'greedy' in self.selector_type:
+                self.selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
+                    self.device)
+            elif 'random' in self.selector_type:
+                self.selector = RandomAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
+                    self.device)
+            else:
+                raise ValueError(f"Unknown selector type {self.selector_type}")
         # Note, the final activation cannot be tanh, check.
         self.emergency_mode_list = np.zeros([self.episode_length, self.n_agents], dtype=np.bool_)
         self.emergency_target_list = np.zeros([self.episode_length, self.n_agents, 2], dtype=np.float32)
@@ -582,12 +592,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             else:
                 # logging.debug(f"Mode before obs: {self.emergency_mode.cpu().numpy()}")
                 if torch.sum(all_obs) > 0:
-                    if self.selector_type == 'oracle':
+                    if 'oracle' in self.selector_type:
                         # split all_obs into [num_envs] of vectors
                         self.oracle_assignment(all_obs, emergency_xy, target_coverage,
                                                self.emergency_mode, self.emergency_target,
                                                self.emergency_indices)
-                    elif self.selector_type == 'RL':
+                    elif 'RL' in self.selector_type:
                         self.rl_assignment(all_obs, emergency_xy, target_coverage, self.emergency_queue, self.n_agents)
                         # old_reference = self.oracle_assignment(all_obs.clone().detach(), emergency_xy, target_coverage,
                         #                        self.mock_emergency_mode, self.mock_emergency_target,

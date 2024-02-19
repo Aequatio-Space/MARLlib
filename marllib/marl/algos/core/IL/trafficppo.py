@@ -34,7 +34,7 @@ from tqdm import tqdm
 
 ORIGINAL_REWARDS = 'original_rewards'
 
-EMERGENCY_REWARD_INCREMENT = 1.0
+EMERGENCY_REWARD_INCREMENT = 10.0
 
 emergency_feature_in_state = 5
 
@@ -489,6 +489,7 @@ def add_auxiliary_loss(
         mean_reward = torch.tensor(0.0).to(device)
         if len(parameters_list) > 0:
             rl_optimizer = optim.Adam(parameters_list, lr=0.001)
+            assert 0 <= model.rl_gamma <= 1, "gamma should be in [0, 1]"
             model.selector.train()
             full_batches = []
             if model.last_rl_transitions is not None:
@@ -527,7 +528,7 @@ def add_auxiliary_loss(
                 mean_loss = torch.tensor(0.0).to(device)
                 # progress = tqdm(full_batches)
                 for batch in full_batches:
-                    discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0)
+                    discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], model.rl_gamma)
                     # normalize rewards
                     # discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
                     #         discounted_rewards.std() + 1e-8)
@@ -597,6 +598,7 @@ def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewa
 
 def calculate_assign_rewards_lite(assign_obs, assign_rewards, actions, emergency_states,
                                   lower_level_obs, lower_level_reward):
+    logging.debug("assign rewards lite is called")
     allocation_list = assign_obs[..., -2:]
     assignment_status = list(emergency_states[..., 4][-1])
     emergency_xy = emergency_states[..., 0:2][-1]
