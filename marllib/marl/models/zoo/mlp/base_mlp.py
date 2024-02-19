@@ -371,12 +371,11 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_threshold = self.model_arch_args['emergency_threshold']
         self.tolerance = self.model_arch_args['tolerance']
         self.dataset_name = self.model_arch_args['dataset']
+        self.look_ahead = self.model_arch_args['look_ahead']
+        self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
         self.rl_update_interval = max(1, self.num_envs // 10)
         self.train_count = 0
-        self.look_ahead = True
-        # self.emergency_queue_length = 5
-        self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
         emergency_path_name = os.path.join(get_project_root(), 'datasets',
                                            self.dataset_name, 'emergency_time_loc_0900_0930.csv')
         if os.path.exists(emergency_path_name):
@@ -859,9 +858,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     current_queue = my_emergency_queue[agent_id]
                     if len(current_queue) < self.emergency_queue_length:
                         current_queue.append(actual_emergency_indices[k])
-                        agents_queue_len[action] += 1
                         single_invalid_mask[action] = agents_queue_len[action] >= self.emergency_queue_length
-                        agents_pos[action] = torch.from_numpy(emergency)
+                        if self.look_ahead:
+                            agents_pos[action] = torch.from_numpy(emergency)
+                            agents_queue_len[action] += 1
                 if len(obs_list) > 0:
                     self.last_rl_transitions[i].append(
                         SampleBatch(
