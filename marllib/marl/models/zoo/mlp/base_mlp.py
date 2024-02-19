@@ -343,6 +343,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.assignment_sample_batches = []
         self.inputs = None
         self.evaluate_count_down = self.eval_interval = 5
+        self.trajectory_generated = 0
         self.custom_config = model_config["custom_model_config"]
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
@@ -725,12 +726,13 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     all_rendering_info = pd.DataFrame(final_table.reshape(self.episode_length, -1), columns=columns)
                     # save to csv
                     datatime_str = datetime.now().strftime("%Y%m%d-%H%M%S")
-                    all_rendering_info.to_csv(f'{self.render_file_name}_{datatime_str}.csv')
+                    all_rendering_info.to_csv(f'{self.render_file_name}_{datatime_str}_{self.trajectory_generated}.csv')
                     logging.debug(f"Detailed Assignment result saved to {self.render_file_name}_{datatime_str}.csv")
                     # reset emergency_queue_list
                     self.emergency_queue_list.fill(-1.0)
                 if self.evaluate_count_down <= 0:
                     self.evaluate_count_down = self.eval_interval
+                    self.trajectory_generated += 1
                 else:
                     self.evaluate_count_down -= 1
                     logging.debug(f"Crowdsim Eval Countdown: {self.evaluate_count_down}")
@@ -1016,13 +1018,12 @@ def construct_query_batch(
     last_round_emergency = my_emergency_mode & last_round_emergency
 
     for i, this_coverage in enumerate(target_coverage):
-        my_queue: deque = my_emergency_queue[i]
         if not my_emergency_mode[i]:
             env_num = i // n_agents
             offset = env_num * n_agents
             valid_emergencies = this_coverage == 0
             # convert all queue entries in an env into a list
-            env_queues = [list(q) for q in my_emergency_queue[offset:offset + n_agents]]
+            env_queues = my_emergency_queue[offset:offset + n_agents]
             # unwrap list of list, remove emergencies in agents queue.
             additional_emergencies = [item for sublist in env_queues for item in sublist]
             valid_emergencies[additional_emergencies] = False

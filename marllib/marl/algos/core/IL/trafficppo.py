@@ -9,7 +9,8 @@ import random
 import re
 from copy import deepcopy
 from typing import Dict, List, Type, Union, Optional
-
+from numba.core import types
+from numba.typed import Dict as NumbaDict
 import gym
 import numpy as np
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
@@ -512,16 +513,21 @@ def add_auxiliary_loss(
                         lower_level_rewards = lower_agent_batch['original_rewards']
                     else:
                         lower_level_rewards = lower_agent_batch[SampleBatch.REWARDS]
+                    emergency_in_lower_level_obs = lower_agent_batch[SampleBatch.OBS][..., 20:22]
+                    if isinstance(emergency_in_lower_level_obs, torch.Tensor):
+                        emergency_in_lower_level_obs = emergency_in_lower_level_obs.cpu().numpy()
+                    if isinstance(lower_level_rewards, torch.Tensor):
+                        lower_level_rewards = lower_level_rewards.cpu().numpy()
                     calculate_assign_rewards_lite(full_batches[i][SampleBatch.CUR_OBS],
                                                   full_batches[i][SampleBatch.REWARDS],
                                                   full_batches[i][SampleBatch.ACTIONS],
                                                   emergency_states,
-                                                  lower_agent_batch[SampleBatch.OBS],
+                                                  emergency_in_lower_level_obs,
                                                   lower_level_rewards)
                 mean_loss = torch.tensor(0.0).to(device)
                 # progress = tqdm(full_batches)
                 for batch in full_batches:
-                    discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0.3)
+                    discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], 0)
                     # normalize rewards
                     # discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (
                     #         discounted_rewards.std() + 1e-8)
@@ -589,32 +595,26 @@ def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewa
         assign_rewards[allocate_index] = discount_factor * (surveillance_reward + emergency_cover_reward)
     # logging.debug(f"rewards for assignment agent: {assign_rewards}")
 
-
 def calculate_assign_rewards_lite(assign_obs, assign_rewards, actions, emergency_states,
                                   lower_level_obs, lower_level_reward):
     allocation_list = assign_obs[..., -2:]
-    aoi_status, assignment_status = emergency_states[..., 2][-1], emergency_states[..., 4][-1]
+    assignment_status = list(emergency_states[..., 4][-1])
     emergency_xy = emergency_states[..., 0:2][-1]
-    emergency_in_lower_level_obs = lower_level_obs[..., 20:22]
-    if isinstance(emergency_in_lower_level_obs, torch.Tensor):
-        emergency_in_lower_level_obs = emergency_in_lower_level_obs.cpu().numpy()
-    if isinstance(lower_level_reward, torch.Tensor):
-        lower_level_reward = lower_level_reward.cpu().numpy()
-    start_indices, end_indices = get_emergency_start_end_numba(emergency_in_lower_level_obs)
-    selected_emergencies = emergency_in_lower_level_obs[start_indices]
+    start_indices, end_indices = get_emergency_start_end_numba(lower_level_obs)
+    selected_emergencies = lower_level_obs[np.array(start_indices)]
+    # construct a dict from emergency_xy
+    emergency_dict = {(x, y): i for i, (x, y) in enumerate(emergency_xy)}
+    lower_level_dict = {(x, y): i for i, (x, y) in enumerate(selected_emergencies)}
     for i, (action, emergency) in enumerate(zip(actions, allocation_list)):
-        emergency_index = np.nonzero((emergency[0] == emergency_xy[:, 0]) &
-                                     (emergency[1] == emergency_xy[:, 1]))[0]
-        lower_level_index = np.nonzero((emergency[0] == selected_emergencies[:, 0]) &
-                                       (emergency[1] == selected_emergencies[:, 1]))[0]
-        if len(lower_level_index) == 0:
+        coordinates_tuple = (emergency[0], emergency[1])
+        emergency_index = emergency_dict.get(coordinates_tuple, -1)
+        lower_level_index = lower_level_dict.get(coordinates_tuple, -1)
+        if lower_level_index == -1:
             emergency_cover_reward = -1.0
         else:
-            logging.debug(f"length of lower_level_index: {len(lower_level_index)}")
-            logging.debug(f"length of emergency_index: {len(emergency_index)}")
-            logging.debug(selected_emergencies)
-            assert len(emergency_index) == len(lower_level_index) == 1
-            lower_level_index = lower_level_index[0]
+            # logging.debug(f"length of lower_level_index: {len(lower_level_index)}")
+            # logging.debug(f"length of emergency_index: {len(emergency_index)}")
+            # logging.debug(selected_emergencies)
             if assignment_status[emergency_index] == action:
                 delta = end_indices[lower_level_index] - start_indices[lower_level_index] - 1
                 discount_factor = (episode_length - delta) / episode_length
