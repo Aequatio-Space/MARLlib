@@ -406,7 +406,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_indices = np.full(total_slots, -1, dtype=np.int32)
         self.emergency_target = np.full((total_slots, 2), -1, dtype=np.float32)
         self.emergency_queue = [deque() for _ in range(total_slots)]
-        self.assign_status = np.zeros(self.emergency_count * self.num_envs, dtype=np.int32_)
+        self.assign_status = np.full(self.emergency_count * self.num_envs, dtype=np.int32, fill_value=-1)
         self.with_programming_optimization = self.model_arch_args['with_programming_optimization']
         self.one_agent_multi_task = self.model_arch_args['one_agent_multi_task']
         self.last_emergency_selection = self.last_emergency_indices = torch.zeros(self.n_agents,
@@ -440,7 +440,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
 
         logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
         logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
-        if self.checkpoint_path is not None:
+        if self.checkpoint_path and not self.render:
             logging.debug(f"Loading checkpoint from {self.checkpoint_path['model_path']}")
             model_state = pickle.load(open(self.checkpoint_path['model_path'], 'rb'))
             worker_state = pickle.loads(model_state['worker'])['state']
@@ -512,6 +512,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_mode.fill(False)
         self.emergency_indices.fill(-1)
         self.emergency_target.fill(-1.0)
+        self.assign_status.fill(-1)
         self.emergency_queue = [deque() for _ in range(self.n_agents * self.num_envs)]
         # same mode, indices, target with "mock" for testing
         # self.mock_emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
@@ -600,6 +601,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 # else:
                 # predicted_values[i] = -1
         return all_obs
+
+    def get_allocation_table(self):
+        """
+        Get the allocation table for the emergency tasks
+        """
+        return self.assign_status.reshape(self.num_envs, self.emergency_count)
 
     def query_and_assign(self, flat_inputs, input_dict):
         # assert torch.all(self.emergency_queue_lens == torch.tensor([len(q) for q in self.emergency_queue]))
@@ -847,7 +854,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs, env_target_coverage)):
             offset = i * n_agents
             emergency_offset = i * self.emergency_count
-            valid_emergencies = this_coverage == 0
+            this_assign_status = self.assign_status[emergency_offset:emergency_offset + self.emergency_count]
+            valid_emergencies = (this_coverage == 0) & (this_assign_status == -1)
             # convert all queue entries in an env into a list
             env_queues = my_emergency_queue[offset:offset + n_agents]
             agents_pos = env_obs[:, n_agents + 2: n_agents + 4]
@@ -862,14 +870,13 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 logging.debug("All agents are full, no assignment is made")
                 continue
             # unwrap list of list, remove emergencies in agents queue.
-            additional_emergencies = [item for sublist in env_queues for item in sublist]
-            logging.debug(f"Additional Emergencies to remove: {additional_emergencies}")
-            valid_emergencies[additional_emergencies] = False
+            # additional_emergencies = [item for sublist in env_queues for item in sublist]
+            # logging.debug(f"Additional Emergencies to remove: {additional_emergencies}")
+            # valid_emergencies[additional_emergencies] = False
             emergencies = emergency_xy[valid_emergencies]
             logging.debug(f"Valid Emergencies: {emergencies}")
             received_tasks = len(emergencies)
             if received_tasks > 0:
-                logging.debug(f"Valid Emergencies: {emergencies}")
                 actual_emergency_indices = np.nonzero(valid_emergencies)[0]
                 obs_list, action_list, = [], []
                 for k, emergency in enumerate(emergencies):
@@ -899,7 +906,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         if self.look_ahead:
                             agents_pos[action] = torch.from_numpy(emergency)
                             agents_queue_len[action] += 1
-                        # self.assign_status[emergency_offset + actual_emergency_indices[k]] = True
+                        this_assign_status[actual_emergency_indices[k]] = action
+                        logging.debug(f"Assign Status in Env {i} is {this_assign_status}")
                 if len(obs_list) > 0:
                     self.last_rl_transitions[i].append(
                         SampleBatch(

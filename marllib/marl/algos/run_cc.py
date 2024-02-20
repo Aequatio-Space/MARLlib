@@ -200,6 +200,8 @@ def run_cc(exp_info: Dict, env, model, stop=None):
     }
     if "custom_vector_env" in exp_info:
         run_config["custom_vector_env"] = exp_info["custom_vector_env"]
+    if "callbacks" in exp_info:
+        run_config["callbacks"] = exp_info["callbacks"]
 
     stop_config = {
         "episode_reward_mean": exp_info["stop_reward"],
