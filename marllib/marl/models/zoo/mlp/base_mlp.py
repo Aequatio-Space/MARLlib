@@ -388,7 +388,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.dataset_name = self.model_arch_args['dataset']
         self.look_ahead = self.model_arch_args['look_ahead']
         self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
-        self.checkpoint_path = self.model_arch_args['checkpoint_path']
+        if 'checkpoint_path' in self.model_arch_args:
+            self.checkpoint_path = self.model_arch_args['checkpoint_path']
+        else:
+            self.checkpoint_path = None
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
         self.rl_update_interval = max(1, self.num_envs // 10)
         self.train_count = 0
