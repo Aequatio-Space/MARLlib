@@ -32,7 +32,8 @@ from typing import Any, Dict
 from ray.tune.analysis import ExperimentAnalysis
 
 restore_ignore_params = ['render', 'render_file_name', 'local_mode',
-                         'dataset', 'switch_step', 'emergency_threshold', 'gen_interval']
+                         'dataset', 'switch_step', 'emergency_threshold', 'gen_interval',
+                         'selector_type', 'rl_gamma']
 
 def restore_model(restore: Dict, exp: Dict):
     if restore is not None:

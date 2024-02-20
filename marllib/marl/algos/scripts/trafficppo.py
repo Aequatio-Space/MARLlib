@@ -1,7 +1,23 @@
 # MIT License
+from typing import Any, Dict
+from typing import Optional
+
+from marllib.marl.algos.core.IL.trafficppo import TrafficPPOTrainer
+from marllib.marl.algos.scripts.coma import restore_model
+from marllib.marl.algos.utils.log_dir_util import available_local_dir
+from marllib.marl.algos.utils.setup_utils import AlgVar
+from ray import tune
+from ray.rllib import BaseEnv, Policy
+from ray.rllib.agents.callbacks import DefaultCallbacks
+from ray.rllib.evaluation import MultiAgentEpisode
+from ray.rllib.models import ModelCatalog
+from ray.rllib.utils.typing import PolicyID
+from ray.tune import CLIReporter
+from ray.tune.analysis import ExperimentAnalysis
+from ray.tune.utils import merge_dicts
+
 
 # Copyright (c) 2023 Replicable-MARL
-
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
 # in the Software without restriction, including without limitation the rights
@@ -20,17 +36,17 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from ray import tune
-from ray.tune.utils import merge_dicts
-from ray.tune import CLIReporter
-from ray.rllib.models import ModelCatalog
-from marllib.marl.algos.utils.log_dir_util import available_local_dir
-from marllib.marl.algos.utils.setup_utils import AlgVar
-from marllib.marl.algos.core.IL.trafficppo import TrafficPPOTrainer
-from marllib.marl.algos.scripts.coma import restore_model
-import json
-from typing import Any, Dict
-from ray.tune.analysis import ExperimentAnalysis
+
+class MyCallback(DefaultCallbacks):
+    def on_episode_step(self,
+                        *,
+                        worker: "RolloutWorker",
+                        base_env: BaseEnv,
+                        policies: Optional[Dict[PolicyID, Policy]] = None,
+                        episode: MultiAgentEpisode,
+                        env_index: Optional[int] = None,
+                        **kwargs) -> None:
+        print("Test")
 
 
 def run_traffic_ppo(model: Any, exp: Dict, run: Dict, env: Dict,
@@ -115,6 +131,7 @@ def run_traffic_ppo(model: Any, exp: Dict, run: Dict, env: Dict,
     arch = exp["model_arch_args"]["core_arch"]
     RUNNING_NAME = '_'.join([algorithm, arch, map_name])
     model_path = restore_model(restore, exp)
+    config['callbacks'] = MyCallback
 
     results = tune.run(TrafficPPOTrainer,
                        name=RUNNING_NAME,

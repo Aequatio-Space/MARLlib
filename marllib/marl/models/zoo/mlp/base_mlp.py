@@ -6,6 +6,7 @@ from collections import deque
 from functools import reduce
 from typing import Tuple
 
+import pickle
 import numpy as np
 import pandas as pd
 import wandb
@@ -53,6 +54,20 @@ def generate_identity_matrices(n, m):
     identity_matrices = [np.eye(m) for _ in range(n)]
     # Stack the identity matrices horizontally
     result = np.hstack(identity_matrices)
+    return result
+
+
+def split_first_level(d, convert_tensor=True):
+    result = {}
+    for key, value in d.items():
+        parts = key.split('.')
+        prefix, actual_key = parts[0], '.'.join(parts[1:])
+        if prefix not in result:
+            result[prefix] = {}
+        if convert_tensor:
+            result[prefix][actual_key] = torch.from_numpy(value)
+        else:
+            result[prefix][actual_key] = value
     return result
 
 
@@ -356,7 +371,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.selector_type = (self.model_arch_args['selector_type'] or self.custom_config["selector_type"])
         self.episode_length = 120
-        self.switch_step = self.model_arch_args['switch_step']
+        self.switch_step = -1
         self.step_count = 0
         self.local_mode = self.model_arch_args['local_mode']
         self.render = self.model_arch_args['render']
@@ -373,6 +388,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.dataset_name = self.model_arch_args['dataset']
         self.look_ahead = self.model_arch_args['look_ahead']
         self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
+        self.checkpoint_path = self.model_arch_args['checkpoint_path']
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
         self.rl_update_interval = max(1, self.num_envs // 10)
         self.train_count = 0
@@ -390,6 +406,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_indices = np.full(total_slots, -1, dtype=np.int32)
         self.emergency_target = np.full((total_slots, 2), -1, dtype=np.float32)
         self.emergency_queue = [deque() for _ in range(total_slots)]
+        self.assign_status = np.zeros(self.emergency_count * self.num_envs, dtype=np.int32_)
         self.with_programming_optimization = self.model_arch_args['with_programming_optimization']
         self.one_agent_multi_task = self.model_arch_args['one_agent_multi_task']
         self.last_emergency_selection = self.last_emergency_indices = torch.zeros(self.n_agents,
@@ -423,6 +440,16 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
 
         logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
         logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
+        if self.checkpoint_path is not None:
+            logging.debug(f"Loading checkpoint from {self.checkpoint_path['model_path']}")
+            model_state = pickle.load(open(self.checkpoint_path['model_path'], 'rb'))
+            worker_state = pickle.loads(model_state['worker'])['state']
+            for _, state in worker_state.items():
+                executor_weights = state['weights']
+                separate_weights = split_first_level(executor_weights)
+                for key, value in separate_weights.items():
+                    getattr(self, key).load_state_dict(value)
+                break
         # Holds the current "base" output (before logits layer).
         self._features = None
         # Holds the last input, in case value branch is separate.
@@ -434,6 +461,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.critics = [self.vf_encoder, self.vf_branch]
 
         self.actor_initialized_parameters = self.actor_parameters()
+        self.aux_selector = None
+
         if len(self.selector_type) == 1:
             mode = self.selector_type[0]
             if mode == "greedy":
@@ -445,6 +474,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 self.selector = Predictor(input_dim).to(self.device)
             elif mode == 'RL':
                 self.selector = AgentSelector(self.n_agents * 3 + 2, 64, self.n_agents).to(
+                    self.device)
+                self.aux_selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
                     self.device)
             else:
                 raise ValueError(f"Unknown selector type {self.selector_type}")
@@ -815,6 +846,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
     def do_assignment(self, all_env_obs, emergency_xy, env_target_coverage, my_emergency_queue, n_agents):
         for i, (env_obs, this_coverage) in enumerate(zip(all_env_obs, env_target_coverage)):
             offset = i * n_agents
+            emergency_offset = i * self.emergency_count
             valid_emergencies = this_coverage == 0
             # convert all queue entries in an env into a list
             env_queues = my_emergency_queue[offset:offset + n_agents]
@@ -848,7 +880,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     final_obs = torch.cat([selector_obs, torch.from_numpy(emergency).to(self.device)])
                     final_obs = final_obs.unsqueeze(0)
                     obs_list.append(final_obs.cpu().numpy())
-                    probs = self.selector(final_obs, single_invalid_mask)
+                    if self.step_count > self.switch_step:
+                        logging.debug("Using RL Agent Selector")
+                        probs = self.selector(final_obs, single_invalid_mask)
+                    else:
+                        logging.debug("Using Greedy Agent Selector")
+                        probs = self.aux_selector(final_obs, single_invalid_mask)
                     logging.debug("Probs: {}".format(probs))
                     action_dists: Categorical = Categorical(probs=probs)
                     action = int(action_dists.sample().cpu().numpy())
@@ -862,6 +899,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         if self.look_ahead:
                             agents_pos[action] = torch.from_numpy(emergency)
                             agents_queue_len[action] += 1
+                        # self.assign_status[emergency_offset + actual_emergency_indices[k]] = True
                 if len(obs_list) > 0:
                     self.last_rl_transitions[i].append(
                         SampleBatch(

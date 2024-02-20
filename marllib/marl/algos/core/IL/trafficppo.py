@@ -104,7 +104,7 @@ def relabel_for_sample_batch(
     goal_number = 5
     use_intrinsic = True
     selector_type = policy.model.selector_type
-    use_distance_intrinsic = selector_type != 'NN' or policy.model.step_count < policy.model.switch_step
+    use_distance_intrinsic = 'NN' not in selector_type or policy.model.step_count < policy.model.switch_step
     # logging.debug("use_distance_intrinsic: %s", use_distance_intrinsic)
     # logging.debug("step_count: %d, switch_step: %d", policy.model.step_count, policy.model.switch_step)
     status_dim = policy.model.status_dim
@@ -134,7 +134,8 @@ def relabel_for_sample_batch(
             intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
                                             emergency_threshold=policy.model.emergency_threshold)
         else:
-            assert selector_type == 'NN', "only NN selector supports bootstrapping reward."
+            assert 'NN' == selector_type[0] and len(
+                selector_type) == 1, "only NN selector supports bootstrapping reward."
             inputs = torch.from_numpy(sample_batch['obs'][..., :status_dim + emergency_dim]).float()
             agent_metric_estimations = policy.model.selector(inputs.to(policy.model.device))
             if len(agent_metric_estimations) > 0:
@@ -403,6 +404,7 @@ def calculate_intrinsic(agents_position: np.ndarray,
 
     mask = emergency_position.sum(axis=-1) != 0
     distances = np.linalg.norm(agents_position - emergency_position, axis=1)
+    # add antil gaol at here.
     # find [aoi, (x,y)] array in state
     if not fake:
         age_of_informations, all_emergencies_position = emergency_states[..., 2], np.stack(
@@ -442,7 +444,7 @@ def add_auxiliary_loss(
     num_agents = policy.model.n_agents
     this_emergency_count = policy.model.emergency_count
     emergency_dim = policy.model.emergency_feature_dim
-    if hasattr(model, "selector_type") and model.selector_type == 'NN':
+    if hasattr(model, "selector_type") and 'NN' in model.selector_type:
         batch_size = 32
         learning_rate = 0.001 if model.render is False else 0
         epochs = 1
@@ -484,10 +486,11 @@ def add_auxiliary_loss(
     else:
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
-    if hasattr(model, "selector_type") and model.selector_type == 'RL':
+    logging.debug("Switch Step Status: %s", model.step_count > model.switch_step)
+    if hasattr(model, "selector_type") and 'RL' in model.selector_type:
         parameters_list = [item for item in model.selector.parameters()]
         mean_reward = torch.tensor(0.0).to(device)
-        if len(parameters_list) > 0:
+        if len(parameters_list) > 0 and model.step_count > model.switch_step:
             rl_optimizer = optim.Adam(parameters_list, lr=0.001)
             assert 0 <= model.rl_gamma <= 1, "gamma should be in [0, 1]"
             model.selector.train()
@@ -646,7 +649,7 @@ def add_regress_loss_old(
             of loss tensors.
     """
     # regression training of predictor
-    if hasattr(model, "selector_type") and model.selector_type == 'NN':
+    if hasattr(model, "selector_type") and 'NN' in model.selector_type:
         virtual_obs = train_batch[VIRTUAL_OBS]
         (mean_relabel_percentage, predictor_inputs, predictor_labels,
          relabel_targets, train_batch_device) = increasing_intrinsic_relabeling(
@@ -735,7 +738,7 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
     for item in ['regress_loss']:
         original_dict[item] = torch.mean(torch.stack(policy.get_tower_stats("mean_" + item)))
     for model in policy.model_gpu_towers:
-        if model.selector_type == 'RL':
+        if 'RL' in model.selector_type:
             original_dict['assign_reward'] = torch.mean(torch.stack(policy.get_tower_stats("mean_assign_reward")))
             original_dict['rl_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_rl_loss")))
         if model.last_emergency_mode is not None:
