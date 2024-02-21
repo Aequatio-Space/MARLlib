@@ -128,11 +128,28 @@ def relabel_for_sample_batch(
                                          this_emergency_count * emergency_feature_in_state])
     emergency_states = emergency_states.reshape(-1, this_emergency_count, emergency_feature_in_state)
     agents_position = observation[..., num_agents + 2: num_agents + 4]
+    num_envs = policy.model.num_envs
     if use_intrinsic:
         emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
         if use_distance_intrinsic:
+            if policy.model.sibling_rivalry:
+                reward_count = policy.model.anti_reward_sync_count
+                anti_goal_distances = policy.model.anti_goal_reward[
+                    ..., reward_count // num_agents, reward_count % num_agents]
+                logging.debug(
+                    f"Selecting Env {reward_count // num_agents}, Agent {reward_count % num_agents} for anti-goal.")
+                rewards = sample_batch[SampleBatch.REWARDS]
+                if not rewards.sum() == 0:
+                    policy.model.anti_reward_sync_count += 1
+                else:
+                    anti_goal_distances = None
+                if policy.model.anti_reward_sync_count == num_envs * num_agents:
+                    policy.model.anti_reward_sync_count = 0
+            else:
+                anti_goal_distances = None
             intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
-                                            emergency_threshold=policy.model.emergency_threshold)
+                                            emergency_threshold=policy.model.emergency_threshold,
+                                            anti_goal_distances=anti_goal_distances)
         else:
             assert 'NN' == selector_type[0] and len(
                 selector_type) == 1, "only NN selector supports bootstrapping reward."
@@ -392,11 +409,14 @@ def modify_batch_with_intrinsic(agents_position, emergency_position, emergency_s
     else:
         sample_batch[SampleBatch.REWARDS] += intrinsic
 
+
 def calculate_intrinsic(agents_position: np.ndarray,
                         emergency_position: np.ndarray,
                         emergency_states: np.ndarray,
                         emergency_threshold: int,
-                        fake=False):
+                        fake=False,
+                        anti_goal_distances: np.ndarray = None,
+                        alpha=0.1):
     """
     calculate the intrinsic reward for each agent, which is the product of distance and aoi.
     """
@@ -412,7 +432,10 @@ def calculate_intrinsic(agents_position: np.ndarray,
         indices = match_aoi(all_emergencies_position, emergency_position, mask)
         fetched_aois = age_of_informations[np.arange(len(age_of_informations)), indices]
         mask &= fetched_aois > emergency_threshold
-        intrinsic = -distances * mask * fetched_aois
+        if anti_goal_distances is not None:
+            intrinsic = (anti_goal_distances * alpha - distances) * mask * fetched_aois
+        else:
+            intrinsic = -distances * mask * fetched_aois
     else:
         age_of_informations = np.arange(len(agents_position))
         # find the index of emergency with all_emergencies_position
@@ -441,6 +464,7 @@ def get_emergency_info(batch: SampleBatch, status_dim: int, emergency_dim: int):
     start_indices, end_indices = get_emergency_start_end_numba(emergency_obs)
     selected_emergencies = emergency_obs[start_indices]
     return start_indices, end_indices, selected_emergencies
+
 
 def add_auxiliary_loss(
         policy: TorchPolicy, model: ModelV2,
@@ -495,8 +519,6 @@ def add_auxiliary_loss(
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
     lower_agent_batches = train_batch.split_by_episode()
-    for first_batch, second_batch in zip(lower_agent_batches[::2], lower_agent_batches[1::2]):
-        break
     logging.debug("Switch Step Status: %s", model.step_count > model.switch_step)
     if hasattr(model, "selector_type") and 'RL' in model.selector_type:
         parameters_list = [item for item in model.selector.parameters()]
@@ -572,10 +594,10 @@ def add_auxiliary_loss(
         logging.debug(f"RL Mean Reward: {mean_reward.item()}")
         model.tower_stats['mean_rl_loss'] = mean_loss
         model.tower_stats['mean_assign_reward'] = mean_reward
+    model.tower_stats['mean_intrinsic_rewards'] = torch.mean(train_batch['intrinsic_rewards'])
     model.train()
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
     model.eval()
-
     return total_loss
 
 
@@ -609,6 +631,7 @@ def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewa
         assign_rewards[allocate_index] = discount_factor * (surveillance_reward + emergency_cover_reward)
     # logging.debug(f"rewards for assignment agent: {assign_rewards}")
 
+
 def calculate_assign_rewards_lite(assign_obs, assign_rewards, actions, emergency_states,
                                   lower_level_obs, lower_level_reward):
     logging.debug("assign rewards lite is called")
@@ -641,6 +664,7 @@ def calculate_assign_rewards_lite(assign_obs, assign_rewards, actions, emergency
                 # distance_factor = np.linalg.norm(agents_pos[i][action] - emergency)
                 # emergency_cover_reward = -1 * distance_factor
         assign_rewards[i] = emergency_cover_reward
+
 
 def add_regress_loss_old(
         policy: Policy, model: ModelV2,
@@ -745,7 +769,7 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
     """
     original_dict = kl_and_loss_stats(policy, train_batch)
     #  'label_count', 'valid_fragment_length', 'relabel_percentage'
-    for item in ['regress_loss']:
+    for item in ['regress_loss', 'intrinsic_rewards']:
         original_dict[item] = torch.mean(torch.stack(policy.get_tower_stats("mean_" + item)))
     for model in policy.model_gpu_towers:
         if 'RL' in model.selector_type:
@@ -810,6 +834,8 @@ def after_loss_init(policy: Policy, observation_space: gym.spaces.Space,
                     action_space: gym.spaces.Space, config: TrainerConfigDict) -> None:
     policy.view_requirements[ORIGINAL_REWARDS] = ViewRequirement(
         ORIGINAL_REWARDS, shift=0, used_for_training=True)
+    policy.view_requirements['intrinsic_rewards'] = ViewRequirement(
+        'intrinsic_rewards', shift=0, used_for_training=True)
 
 
 TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(

@@ -13,6 +13,7 @@ import pandas as pd
 import wandb
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
 from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
+from numba import njit
 from ray.rllib.models.torch.misc import SlimFC, normc_initializer
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.policy.sample_batch import SampleBatch
@@ -70,6 +71,35 @@ def split_first_level(d, convert_tensor=True):
         else:
             result[prefix][actual_key] = value
     return result
+
+
+@njit
+def generate_anti_goal_rewards(anti_goal_reward: np.ndarray,
+                               assign_status: np.ndarray,
+                               env_agents_pos: np.ndarray,
+                               env_id: np.ndarray,
+                               emergency_index: np.ndarray):
+    # Process each unique environment pair
+    unique_envs = np.unique(env_id)
+    if len(unique_envs) % 2 and len(unique_envs) > 1:
+        # If the number of unique environments is odd, remove the last environment
+        unique_envs = unique_envs[:-1]
+    # assert len(unique_envs) % 2 == 0, "Number of unique environments must be even"
+    for i in range(0, len(unique_envs), 2):
+        if i + 1 >= len(unique_envs):  # If there's no pair for the last environment, skip
+            break
+        env_a, env_b = unique_envs[i], unique_envs[i + 1]
+        # Get emergencies for each environment
+        emergencies_a = emergency_index[env_id == env_a]
+        emergencies_b = emergency_index[env_id == env_b]
+        # Find common emergencies
+        common_emergencies = np.intersect1d(emergencies_a, emergencies_b)
+        agents_env_a = assign_status[env_a, common_emergencies]
+        agents_env_b = assign_status[env_b, common_emergencies]
+        diff = env_agents_pos[env_a, agents_env_a] - env_agents_pos[env_b, agents_env_b]
+        distances = np.sqrt(diff[..., 0] ** 2 + diff[..., 1] ** 2)
+        anti_goal_reward[env_a, agents_env_a] = distances
+        anti_goal_reward[env_b, agents_env_b] = distances
 
 
 def find_indices_for_cost(cost_array, matrix, atol):
@@ -378,6 +408,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.render = self.model_arch_args['render']
         self.render_file_name = self.model_arch_args['render_file_name']
         self.rl_gamma = self.model_arch_args['rl_gamma']
+        self.sibling_rivalry = self.model_arch_args['sibling_rivalry']
         self._is_train = False
         self.with_task_allocation = self.custom_config["with_task_allocation"]
         self.separate_encoder = self.custom_config["separate_encoder"]
@@ -396,6 +427,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
         self.rl_update_interval = max(1, self.num_envs // 10)
         self.train_count = 0
+        self.anti_reward_sync_count = 0
         emergency_path_name = os.path.join(get_project_root(), 'datasets',
                                            self.dataset_name, 'emergency_time_loc_1400_1430.csv')
         if os.path.exists(emergency_path_name):
@@ -410,7 +442,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_indices = np.full(total_slots, -1, dtype=np.int32)
         self.emergency_target = np.full((total_slots, 2), -1, dtype=np.float32)
         self.emergency_queue = [deque() for _ in range(total_slots)]
-        self.anti_goal_reward = np.zeros((self.num_envs, self.n_agents, self.episode_length), dtype=np.float32)
+        self.anti_goal_reward = np.zeros((self.episode_length, self.num_envs, self.n_agents), dtype=np.float32)
         self.assign_status = np.full((self.num_envs, self.emergency_count), dtype=np.int32, fill_value=-1)
         self.with_programming_optimization = self.model_arch_args['with_programming_optimization']
         self.one_agent_multi_task = self.model_arch_args['one_agent_multi_task']
@@ -517,6 +549,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.emergency_mode.fill(False)
         self.emergency_indices.fill(-1)
         self.emergency_target.fill(-1.0)
+        self.anti_goal_reward.fill(0.0)
         self.assign_status.fill(-1)
         self.emergency_queue = [deque() for _ in range(self.n_agents * self.num_envs)]
         # same mode, indices, target with "mock" for testing
@@ -616,17 +649,20 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         return self.assign_status
 
     def query_and_assign(self, flat_inputs, input_dict):
+
         # assert torch.all(self.emergency_queue_lens == torch.tensor([len(q) for q in self.emergency_queue]))
         if not self._is_train:
             all_obs = flat_inputs[Constants.VECTOR_STATE]
+            not_dummy_batch = torch.sum(all_obs) > 0
             numpy_observations = all_obs.cpu().numpy()
+
             emergency_status = input_dict['obs']['state'][Constants.VECTOR_STATE][...,
                                self.n_agents * (self.n_agents + 4):-1].reshape(-1, self.emergency_count,
                                                                                5).cpu().numpy()
             emergency_xy = np.stack((emergency_status[0][:, 0],
                                      emergency_status[0][:, 1]), axis=-1)
             target_coverage = emergency_status[..., 3]
-            timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0].to(torch.int32)
+            timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0].to(torch.int32).item()
             logging.debug("NN logged timestep: {}".format(timestep))
             if timestep == 0:
                 for item in ['emergency_mode', 'emergency_target']:
@@ -636,7 +672,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 self.reset_states()
             else:
                 # logging.debug(f"Mode before obs: {self.emergency_mode.cpu().numpy()}")
-                if torch.sum(all_obs) > 0:
+                if not_dummy_batch:
                     if 'oracle' in self.selector_type:
                         # split all_obs into [num_envs] of vectors
                         self.oracle_assignment(all_obs, emergency_xy, target_coverage,
@@ -796,6 +832,19 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     logging.debug(f"Crowdsim Eval Countdown: {self.evaluate_count_down}")
                 self.step_count += self.episode_length * self.num_envs
             self.last_virtual_obs = input_dict['obs']['obs']['agents_state']
+            if not_dummy_batch:
+                env_agents_pos = numpy_observations[:, self.n_agents + 2: self.n_agents + 4].reshape(-1, self.n_agents,
+                                                                                                     2)
+                valid_mask = (self.assign_status != -1) & (target_coverage[::self.n_agents] == 0)
+                env_id, emergency_index = np.nonzero(valid_mask)
+                if len(env_id) > 0:
+                    generate_anti_goal_rewards(
+                        self.anti_goal_reward[timestep],
+                        self.assign_status,
+                        env_agents_pos,
+                        env_id,
+                        emergency_index,
+                    )
         else:
             try:
                 input_dict['obs']['obs']['agents_state'] = input_dict['virtual_obs']
