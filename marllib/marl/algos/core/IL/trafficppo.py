@@ -434,6 +434,14 @@ def match_aoi(all_emergencies_position: np.ndarray,
     return indices
 
 
+def get_emergency_info(batch: SampleBatch, status_dim: int, emergency_dim: int):
+    emergency_obs = batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+    if isinstance(emergency_obs, torch.Tensor):
+        emergency_obs = emergency_obs.cpu().numpy()
+    start_indices, end_indices = get_emergency_start_end_numba(emergency_obs)
+    selected_emergencies = emergency_obs[start_indices]
+    return start_indices, end_indices, selected_emergencies
+
 def add_auxiliary_loss(
         policy: TorchPolicy, model: ModelV2,
         dist_class: Type[TorchDistributionWrapper],
@@ -486,6 +494,9 @@ def add_auxiliary_loss(
     else:
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
+    lower_agent_batches = train_batch.split_by_episode()
+    for first_batch, second_batch in zip(lower_agent_batches[::2], lower_agent_batches[1::2]):
+        break
     logging.debug("Switch Step Status: %s", model.step_count > model.switch_step)
     if hasattr(model, "selector_type") and 'RL' in model.selector_type:
         parameters_list = [item for item in model.selector.parameters()]
@@ -502,8 +513,7 @@ def add_auxiliary_loss(
             length_of_batches = len(full_batches)
             if length_of_batches > 0:
                 # update assignment rl trajectory with lower level agent trajectories
-                lower_agent_batches = train_batch.split_by_episode()
-                episode_length = policy.model.episode_length
+                # episode_length = policy.model.episode_length
                 # print("Number of batches: ", len(lower_agent_batches))
                 for i, lower_agent_batch in enumerate(lower_agent_batches):
                     observation = lower_agent_batch[SampleBatch.OBS]

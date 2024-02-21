@@ -2,6 +2,7 @@
 import logging
 import os
 import pprint
+import time
 from collections import deque
 from functools import reduce
 from typing import Tuple
@@ -396,7 +397,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.rl_update_interval = max(1, self.num_envs // 10)
         self.train_count = 0
         emergency_path_name = os.path.join(get_project_root(), 'datasets',
-                                           self.dataset_name, 'emergency_time_loc_0900_0930.csv')
+                                           self.dataset_name, 'emergency_time_loc_1400_1430.csv')
         if os.path.exists(emergency_path_name):
             self.unique_emergencies = pd.read_csv(emergency_path_name)
             self.emergency_count = len(self.unique_emergencies)
@@ -542,7 +543,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         else:
             flat_inputs = observation.float()
         if self.with_task_allocation:
+            start_time = time.time()
             self.query_and_assign(flat_inputs, input_dict)
+            logging.debug("--- query_and_assign %s seconds ---" % (time.time() - start_time))
         return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
 
     def one_time_assign(self, flat_inputs, input_dict):
@@ -689,6 +692,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                                        zip(agent_nums, np.split(outputs, env_stop_index))]
                                     for matrix, cur_index in zip(all_cost_matrix, [0] + agent_stop_index.tolist()):
                                         row_ind, col_ind = linear_sum_assignment(matrix)
+                                        emergency_offset = agent_envs[cur_index] * self.emergency_count
+                                        self.assign_status[
+                                            emergency_offset + actual_emergency_indices[col_ind]] = row_ind
                                         logging.debug("Cost Function")
                                         logging.debug(matrix)
                                         mask = self.emergency_mode[
@@ -714,6 +720,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                                             (actual_emergency_indices[emergency_index]))
                                                     else:
                                                         break
+                                    logging.debug(f"Assign Status in this batch is {self.assign_status}")
                                 else:
                                     allocation_agents = actual_emergency_indices = \
                                         selected_emergencies = np.array([-1], dtype=np.int32)
@@ -745,6 +752,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             logging.debug(f"Agent Emergency Indices: {self.emergency_indices[:16]}")
             logging.debug(f"Emergency Queue: {self.emergency_queue[:16]}")
             logging.debug(f"Emergency Queue Length: {[len(q) for q in self.emergency_queue[:16]]}")
+
             if self.render or self.evaluate_count_down == 0:
                 self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents]
                 self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents]
