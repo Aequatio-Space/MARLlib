@@ -434,6 +434,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.switch_step = -1
         self.step_count = 0
         self.rl_update_interval = max(1, self.num_envs // 10)
+        self.reward_mode = self.model_arch_args['reward_mode']
+        self.fail_hint = self.model_arch_args['fail_hint']
         self.train_count = 0
         # self.anti_reward_sync_count = 0
         emergency_path_name = os.path.join(get_project_root(), 'datasets',

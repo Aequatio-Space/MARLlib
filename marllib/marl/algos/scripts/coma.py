@@ -34,7 +34,7 @@ from ray.tune.analysis import ExperimentAnalysis
 restore_ignore_params = ['render', 'render_file_name', 'local_mode',
                          'dataset', 'switch_step', 'emergency_threshold', 'gen_interval',
                          'selector_type', 'rl_gamma', 'checkpoint_path', 'sibling_rivalry',
-                         'alpha']
+                         'alpha', 'fail_hint', 'reward_mode']
 
 def restore_model(restore: Dict, exp: Dict):
     if restore is not None:
