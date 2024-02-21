@@ -40,7 +40,6 @@ model_arch_args:
       model_arch_args:
         core_arch: mlp
         fc_layer: 3
-        out_dim_fc_0: 64
-        out_dim_fc_1: 64
-        out_dim_fc_2: 64
-
+        out_dim_fc_0: 32
+        out_dim_fc_1: 32
+        out_dim_fc_2: 32

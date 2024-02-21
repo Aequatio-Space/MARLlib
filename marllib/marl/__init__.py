@@ -328,11 +328,8 @@ def build_model(
         raise NotImplementedError("{} not supported agent model arch".format(model_preference["core_arch"]))
 
     if isinstance(environment[0].observation_space.spaces['obs'], spaces.Dict):
-        try:
-            is_separate = model_config['separate_encoder']
-        except KeyError:
-            is_separate = False
-        if is_separate:
+        if model_preference['separate_encoder'] or ('separate_encoder' in model_config and
+                                                    model_config['separate_encoder']):
             encoder = "crowdsim_encoder"
         else:
             encoder = "mix_encoder"

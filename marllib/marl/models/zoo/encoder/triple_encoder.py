@@ -42,8 +42,8 @@ class TripleHeadEncoder(nn.Module):
         emergency = inputs[Constants.VECTOR_STATE][..., -self.emergency_dim:]
         output = self.status_grid_encoder({Constants.VECTOR_STATE: status,
                                            Constants.IMAGE_STATE: inputs[Constants.IMAGE_STATE]})
-        emergency = self.emergency_encoder(emergency)
+        emergency_embedding = self.emergency_encoder(emergency)
         status_embedding, grid_embedding = output[..., :self.status_grid_encoder.dims[0]], \
             output[..., self.status_grid_encoder.dims[0]:]
         # x = self.merge_branch(torch.cat((status_embedding, emergency, grid_embedding), dim=-1))
-        return torch.cat((status_embedding, emergency, grid_embedding), dim=-1)
+        return torch.cat((status_embedding, emergency_embedding, grid_embedding), dim=-1)

@@ -32,6 +32,8 @@ from torch import optim
 from torch.distributions import Categorical
 from tqdm import tqdm
 
+ANTI_GOAL_REWARD = 'anti_goal_reward'
+
 ORIGINAL_REWARDS = 'original_rewards'
 
 EMERGENCY_REWARD_INCREMENT = 10.0
@@ -108,7 +110,8 @@ def relabel_for_sample_batch(
     # logging.debug("use_distance_intrinsic: %s", use_distance_intrinsic)
     # logging.debug("step_count: %d, switch_step: %d", policy.model.step_count, policy.model.switch_step)
     status_dim = policy.model.status_dim
-    emergency_dim = policy.model.emergency_feature_dim
+    emergency_dim = policy.model.emergency_dim
+    emergency_feature_dim = policy.model.emergency_feature_dim
     # postprocess of rewards
     num_agents = policy.model.n_agents
     # postprocess extra_batches
@@ -121,39 +124,28 @@ def relabel_for_sample_batch(
     future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch, policy)
     this_emergency_count = policy.model.emergency_count
     observation = sample_batch[SampleBatch.OBS]
-    observation_dim = status_dim + emergency_dim + 100
-    state_agents_dim = (num_agents + 4) * num_agents
-    emergency_states = (observation[..., observation_dim + state_agents_dim:
-                                         state_agents_dim + observation_dim +
-                                         this_emergency_count * emergency_feature_in_state])
-    emergency_states = emergency_states.reshape(-1, this_emergency_count, emergency_feature_in_state)
+    emergency_states = get_emergency_state(emergency_dim, sample_batch, num_agents, status_dim, this_emergency_count)
     agents_position = observation[..., num_agents + 2: num_agents + 4]
     num_envs = policy.model.num_envs
     if use_intrinsic:
-        emergency_position = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+        if policy.model.buffer_in_obs:
+            emergency_position = observation[..., status_dim:status_dim + emergency_feature_dim]
+        else:
+            emergency_position = observation[..., status_dim:status_dim + emergency_dim]
         if use_distance_intrinsic:
             if policy.model.sibling_rivalry:
-                reward_count = policy.model.anti_reward_sync_count
-                anti_goal_distances = policy.model.anti_goal_reward[
-                    ..., reward_count // num_agents, reward_count % num_agents]
-                logging.debug(
-                    f"Selecting Env {reward_count // num_agents}, Agent {reward_count % num_agents} for anti-goal.")
-                rewards = sample_batch[SampleBatch.REWARDS]
-                if not rewards.sum() == 0:
-                    policy.model.anti_reward_sync_count += 1
-                else:
-                    anti_goal_distances = None
-                if policy.model.anti_reward_sync_count == num_envs * num_agents:
-                    policy.model.anti_reward_sync_count = 0
+                assert ANTI_GOAL_REWARD in sample_batch, ANTI_GOAL_REWARD + " is not in sample_batch."
+                anti_goal_distances = sample_batch[ANTI_GOAL_REWARD]
             else:
                 anti_goal_distances = None
             intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
                                             emergency_threshold=policy.model.emergency_threshold,
-                                            anti_goal_distances=anti_goal_distances)
+                                            anti_goal_distances=anti_goal_distances,
+                                            alpha=policy.model.alpha)
         else:
             assert 'NN' == selector_type[0] and len(
                 selector_type) == 1, "only NN selector supports bootstrapping reward."
-            inputs = torch.from_numpy(sample_batch['obs'][..., :status_dim + emergency_dim]).float()
+            inputs = torch.from_numpy(observation[..., :status_dim + emergency_dim]).float()
             agent_metric_estimations = policy.model.selector(inputs.to(policy.model.device))
             if len(agent_metric_estimations) > 0:
                 agent_metric_estimations = agent_metric_estimations.squeeze(-1)
@@ -475,18 +467,20 @@ def add_auxiliary_loss(
     device = model.device
     num_agents = policy.model.n_agents
     this_emergency_count = policy.model.emergency_count
-    emergency_dim = policy.model.emergency_feature_dim
+    emergency_dim = policy.model.emergency_dim
+    emergency_feature_dim = policy.model.emergency_feature_dim
     if hasattr(model, "selector_type") and 'NN' in model.selector_type:
         batch_size = 32
         learning_rate = 0.001 if model.render is False else 0
         epochs = 1
         criterion = nn.MSELoss()
         optimizer = optim.Adam(model.selector.parameters(), lr=learning_rate)
+        observation = train_batch[SampleBatch.OBS]
         try:
-            train_batch[SampleBatch.OBS][..., :status_dim + emergency_dim] = train_batch[VIRTUAL_OBS]
+            observation[..., :status_dim + emergency_dim] = train_batch[VIRTUAL_OBS]
         except KeyError:
             pass
-        inputs = train_batch[SampleBatch.OBS][..., :status_dim + emergency_dim]
+        inputs = observation[..., :status_dim + emergency_dim]
         labels = train_batch['labels']
         # test, greedy label (worked)
         # labels = torch.norm(train_batch[SampleBatch.OBS][..., 20:22] - train_batch[SampleBatch.OBS][..., 6:8], dim=-1)
@@ -538,13 +532,8 @@ def add_auxiliary_loss(
                 # episode_length = policy.model.episode_length
                 # print("Number of batches: ", len(lower_agent_batches))
                 for i, lower_agent_batch in enumerate(lower_agent_batches):
-                    observation = lower_agent_batch[SampleBatch.OBS]
-                    observation_dim = status_dim + emergency_dim + 100
-                    state_agents_dim = (num_agents + 4) * num_agents
-                    emergency_states = (observation[..., observation_dim + state_agents_dim:
-                                                         state_agents_dim + observation_dim +
-                                                         this_emergency_count * emergency_feature_in_state])
-                    emergency_states = emergency_states.reshape(-1, this_emergency_count, emergency_feature_in_state)
+                    emergency_states = get_emergency_state(emergency_dim, lower_agent_batch, num_agents, status_dim,
+                                                           this_emergency_count)
                     if 'original_rewards' in lower_agent_batch:
                         lower_level_rewards = lower_agent_batch['original_rewards']
                     else:
@@ -599,6 +588,17 @@ def add_auxiliary_loss(
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
     model.eval()
     return total_loss
+
+
+def get_emergency_state(emergency_dim, lower_agent_batch, num_agents, status_dim, this_emergency_count):
+    observation = lower_agent_batch[SampleBatch.OBS]
+    observation_dim = status_dim + emergency_dim + 100
+    state_agents_dim = (num_agents + 4) * num_agents
+    emergency_states = (observation[..., observation_dim + state_agents_dim:
+                                         state_agents_dim + observation_dim +
+                                         this_emergency_count * emergency_feature_in_state])
+    emergency_states = emergency_states.reshape(-1, this_emergency_count, emergency_feature_in_state)
+    return emergency_states
 
 
 # @njit
@@ -754,11 +754,10 @@ def increasing_intrinsic_relabeling(model, train_batch, virtual_obs):
 def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
     """Attach virtual obs to sample batch for Intrinsic reward calculation."""
     extra_dict = vf_preds_fetches(policy, input_dict, state_batches, model, action_dist)
-    try:
+    if hasattr(model, "with_task_allocation") and model.with_task_allocation:
         extra_dict[VIRTUAL_OBS] = model.last_virtual_obs.cpu().numpy()
-        # extra_dict['predicted_values'] = model.last_predicted_values
-    except AttributeError:
-        pass
+    if hasattr(model, "sibling_rivalry") and model.sibling_rivalry:
+        extra_dict[ANTI_GOAL_REWARD] = model.last_anti_goal_reward
     return extra_dict
 
 
