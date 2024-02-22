@@ -658,13 +658,15 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
             emergency_cover_reward = fail_penalty
         else:
             if assignment_status[emergency_index] == action:
-                delta = end_indices[lower_level_index] - start_indices[lower_level_index] - 1
+                delta = end_indices[lower_level_index] - start_indices[lower_level_index]
                 discount_factor = (episode_length - delta) / episode_length
                 if mode == 'none':
                     mean_reward = 0.0
                 else:
                     mean_reward = np.mean(lower_level_rewards[start_indices[lower_level_index]:
                                                               end_indices[lower_level_index]])
+                    if np.isnan(mean_reward):
+                        mean_reward = 0.0
                 emergency_cover_reward = (EMERGENCY_REWARD_INCREMENT + mean_reward) * discount_factor
             else:
                 if fail_hint:
