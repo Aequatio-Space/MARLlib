@@ -546,10 +546,11 @@ def add_auxiliary_loss(
                     discounted_rewards = torch.from_numpy(discounted_rewards.copy()).to(device)
                     mean_reward += torch.mean(discounted_rewards)
                     inputs = torch.from_numpy(batch[SampleBatch.CUR_OBS]).to(device)
-                    batch_dist: Categorical = Categorical(probs=model.selector(inputs))
+                    invalid_masks = torch.from_numpy(batch['invalid_mask']).to(device)
+                    batch_dist: Categorical = Categorical(probs=model.selector(inputs, invalid_mask=invalid_masks))
                     actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
-                    log_probs = -batch_dist.log_prob(actions_tensor)
-                    loss = torch.mean(log_probs * discounted_rewards).to(device)
+                    log_probs = batch_dist.log_prob(actions_tensor)
+                    loss = torch.mean(-log_probs * discounted_rewards).to(device)
                     # progress.set_postfix({'loss': loss.item()})
                     rl_optimizer.zero_grad()
                     loss.backward()
@@ -663,8 +664,11 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
                 if mode == 'none':
                     mean_reward = 0.0
                 else:
-                    mean_reward = np.mean(lower_level_rewards[start_indices[lower_level_index]:
-                                                              end_indices[lower_level_index]])
+                    if delta > 0:
+                        mean_reward = np.mean(lower_level_rewards[start_indices[lower_level_index]:
+                                                                  end_indices[lower_level_index]])
+                    else:
+                        mean_reward = 0.0
                     if np.isnan(mean_reward):
                         mean_reward = 0.0
                 emergency_cover_reward = (EMERGENCY_REWARD_INCREMENT + mean_reward) * discount_factor

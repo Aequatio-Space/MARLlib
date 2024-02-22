@@ -925,7 +925,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 actual_agent_id = offset + j
                 my_queue = my_emergency_queue[actual_agent_id]
                 while len(my_queue) > 0 and env_covered_emergency[i][my_queue[0]]:
-                    logging.debug(f"Emergency {my_queue[0]} is covered by agent {actual_agent_id}")
+                    # logging.debug(f"Emergency {my_queue[0]} is covered by agent {actual_agent_id}")
                     my_queue.popleft()
 
     def do_assignment(self, all_env_obs, emergency_xy, env_target_coverage, my_emergency_queue, n_agents):
@@ -958,7 +958,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 this_assign_status = self.assign_status[i]
                 agents_queue_len = env_queue_lens[i].unsqueeze(-1)
                 actual_emergency_indices = np.nonzero(valid_emergencies)[0]
-                obs_list, action_list, = [], []
+                obs_list, action_list, invalid_mask_list = [], [], []
                 for k, emergency in enumerate(emergencies):
                     if torch.all(single_invalid_mask):
                         logging.debug("All agents are full, no further assignment will be made")
@@ -976,6 +976,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     logging.debug("Probs: {}".format(probs))
                     action_dists: Categorical = Categorical(probs=probs)
                     action = int(action_dists.sample().cpu().numpy())
+                    invalid_mask_list.append(single_invalid_mask.cpu().numpy())
+                    # log_prob = action_dists.log_prob(action)
+                    # action_logp_list.append(log_prob.cpu().numpy())
                     action_list.append(action)
                     # reward = -np.linalg.norm(agents_pos[actions].cpu().numpy() - emergencies, axis=1)
                     agent_id = offset + action
@@ -995,6 +998,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                             {
                                 SampleBatch.OBS: np.vstack(obs_list),
                                 SampleBatch.ACTIONS: np.array(action_list, dtype=np.int32),
+                                'invalid_mask': np.array(invalid_mask_list, dtype=np.bool_),
+                                # SampleBatch.ACTION_LOGP: np.array(action_logp_list, dtype=np.float32),
                                 SampleBatch.REWARDS: np.full_like(action_list, -1, dtype=np.float32),
                             }
                         )
