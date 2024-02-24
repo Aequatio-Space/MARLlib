@@ -651,7 +651,7 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
     # construct a dict from emergency_xy
     emergency_dict = {(x, y): i for i, (x, y) in enumerate(emergency_xy)}
     lower_level_dict = {(x, y): i for i, (x, y) in enumerate(selected_emergencies)}
-    fail_penalty = -1.0 if (mode == 'original' or mode == 'none') else -50.0
+    fail_penalty = -EMERGENCY_REWARD_INCREMENT
     for i, (action, emergency) in enumerate(zip(assign_actions, allocation_list)):
         coordinates_tuple = (emergency[0], emergency[1])
         emergency_index = emergency_dict.get(coordinates_tuple, -1)
@@ -659,9 +659,12 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
         if lower_level_index == -1:
             emergency_cover_reward = fail_penalty
         else:
+            distances = np.linalg.norm(agents_pos[i] - emergency, axis=1)
+            discount_factor = np.zeros(len(distances))
+            discount_factor[np.argsort(distances)] = np.linspace(1 / len(distances), 1, len(distances))
             if assignment_status[emergency_index] == action:
                 delta = end_indices[lower_level_index] - start_indices[lower_level_index]
-                discount_factor = (episode_length - delta) / episode_length
+                # discount_factor = (episode_length - delta) / episode_length
                 if mode == 'none':
                     mean_reward = 0.0
                 else:
@@ -672,11 +675,10 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
                         mean_reward = 0.0
                     if np.isnan(mean_reward):
                         mean_reward = 0.0
-                emergency_cover_reward = (EMERGENCY_REWARD_INCREMENT + mean_reward) * discount_factor
+                emergency_cover_reward = (EMERGENCY_REWARD_INCREMENT + mean_reward) * (1 - discount_factor[action])
             else:
                 if fail_hint:
-                    distance_factor = np.linalg.norm(agents_pos[i][action] - emergency)
-                    emergency_cover_reward = fail_penalty * distance_factor
+                    emergency_cover_reward = fail_penalty * discount_factor[action]
                 else:
                     emergency_cover_reward = fail_penalty
         assign_rewards[i] = emergency_cover_reward

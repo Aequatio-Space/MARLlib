@@ -1041,6 +1041,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 actual_emergency_indices = np.nonzero(valid_emergencies)[0]
                 obs_list, action_list, invalid_mask_list = [], [], []
                 for k, emergency in enumerate(emergencies):
+                    # relative_pos = agents_pos - np.tile(emergency, reps=self.n_agents).reshape(self.n_agents, 2)
                     if torch.all(single_invalid_mask):
                         logging.debug("All agents are full, no further assignment will be made")
                         break
