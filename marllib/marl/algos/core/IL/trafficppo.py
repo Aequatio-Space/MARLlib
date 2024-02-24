@@ -556,6 +556,7 @@ def add_auxiliary_loss(
                     loss.backward()
                     mean_loss += loss.detach()
                     rl_optimizer.step()
+                    # print gradient of the model
                 mean_reward /= length_of_batches
                 mean_loss /= length_of_batches
                 model.selector.eval()
