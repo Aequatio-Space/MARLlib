@@ -141,7 +141,7 @@ def relabel_for_sample_batch(
             intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
                                             emergency_threshold=policy.model.emergency_threshold,
                                             anti_goal_distances=anti_goal_distances,
-                                            alpha=policy.model.alpha)
+                                            alpha=policy.model.alpha, mode=policy.model.intrinsic_mode)
         else:
             assert 'NN' == selector_type[0] and len(
                 selector_type) == 1, "only NN selector supports bootstrapping reward."
@@ -408,6 +408,7 @@ def calculate_intrinsic(agents_position: np.ndarray,
                         emergency_threshold: int,
                         fake=False,
                         anti_goal_distances: np.ndarray = None,
+                        mode: str = 'none',
                         alpha=0.1):
     """
     calculate the intrinsic reward for each agent, which is the product of distance and aoi.
@@ -415,19 +416,31 @@ def calculate_intrinsic(agents_position: np.ndarray,
     # mask out penalty where emergency_positions are (0,0), which indicates the agent is not in the emergency.
 
     mask = emergency_position.sum(axis=-1) != 0
-    distances = np.linalg.norm(agents_position - emergency_position, axis=1)
-    # add antil gaol at here.
     # find [aoi, (x,y)] array in state
     if not fake:
-        age_of_informations, all_emergencies_position = emergency_states[..., 2], np.stack(
-            [emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
-        indices = match_aoi(all_emergencies_position, emergency_position, mask)
-        fetched_aois = age_of_informations[np.arange(len(age_of_informations)), indices]
-        mask &= fetched_aois > emergency_threshold
-        if anti_goal_distances is not None:
-            intrinsic = (anti_goal_distances * alpha - distances) * mask * fetched_aois
+        if mode == 'none':
+            return np.zeros(len(agents_position))
         else:
-            intrinsic = -distances * mask * fetched_aois
+            distances = np.linalg.norm(agents_position - emergency_position, axis=1)
+            if mode == 'dis':
+                return -distances * mask
+            else:
+                age_of_informations, all_emergencies_position = emergency_states[..., 2], np.stack(
+                    [emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
+                indices = match_aoi(all_emergencies_position, emergency_position, mask)
+                fetched_aois = age_of_informations[np.arange(len(age_of_informations)), indices]
+                if mode == 'aoi':
+                    return -fetched_aois * mask
+                elif mode == 'dis_aoi':
+                    return -distances * fetched_aois * mask
+                elif mode == 'scaled_dis_aoi':
+                    intrinsic = -distances * mask * fetched_aois / emergency_threshold
+                    if anti_goal_distances is not None:
+                        intrinsic = intrinsic * (1 - alpha) + anti_goal_distances * alpha
+                    return intrinsic
+                else:
+                    raise ValueError("mode should be one of ['none', 'dis', 'aoi', 'dis_aoi', 'scaled_dis_aoi']")
+        # mask &= fetched_aois > emergency_threshold
     else:
         age_of_informations = np.arange(len(agents_position))
         # find the index of emergency with all_emergencies_position

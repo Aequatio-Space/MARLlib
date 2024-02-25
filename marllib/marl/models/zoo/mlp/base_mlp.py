@@ -1,16 +1,17 @@
 # MIT License
 import logging
 import os
+import pickle
 import pprint
-from heapq import heappush, heappop
 from collections import deque
 from functools import reduce
+from heapq import heappush, heappop
 from typing import Tuple, Union
 
-import pickle
 import numpy as np
 import pandas as pd
 import wandb
+from gym import spaces
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
 from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
 from numba import njit
@@ -23,7 +24,6 @@ from ray.rllib.utils.torch_ops import FLOAT_MIN, FLOAT_MAX
 from ray.rllib.utils.typing import Dict, TensorType, List
 from scipy.optimize import linear_sum_assignment, milp, LinearConstraint, Bounds
 from torch.distributions import Categorical
-from gym import spaces
 
 from warp_drive.utils.common import get_project_root
 from warp_drive.utils.constants import Constants
@@ -116,16 +116,27 @@ def split_first_level(d, convert_tensor=True):
     return result
 
 
-def others_target_as_anti_goal(anti_goal_reward: np.ndarray,
-                               assign_status: np.ndarray,
-                               env_agents_pos: np.ndarray,
-                               env_id: np.ndarray,
-                               emergency_index: np.ndarray):
+def others_target_as_anti_goal(env_agents_pos: np.ndarray,
+                               emergency_xy: np.ndarray):
     # generate distance matrix for all agents in each environment
+    num_envs, num_agents = env_agents_pos.shape[0], env_agents_pos.shape[1]
     agents_x = env_agents_pos[..., 0]
     agents_y = env_agents_pos[..., 1]
-    distances = np.sqrt((agents_x - agents_x[:, np.newaxis]) ** 2 + (agents_y - agents_y[:, np.newaxis]) ** 2)
-    print(distances)
+    env_distances = np.sqrt((agents_x[:, np.newaxis, :] - agents_x[:, :, np.newaxis]) ** 2 +
+                            (agents_y[:, np.newaxis, :] - agents_y[:, :, np.newaxis]) ** 2)
+    for i in range(num_envs):
+        np.fill_diagonal(env_distances[i], 1e6)
+    envs_offset = np.repeat(np.arange(0, num_envs * num_agents, num_agents),
+                            repeats=num_agents)
+    nearest_agent_ids = np.argmin(env_distances, axis=2).ravel() + envs_offset
+    flattened_agent_pos = env_agents_pos.reshape(num_envs * num_agents, 2)
+    anti_goals_reward = np.linalg.norm(flattened_agent_pos[nearest_agent_ids] - flattened_agent_pos, axis=1)
+    clipped_reward = np.clip(anti_goals_reward, a_min=0, a_max=0.3)
+    return clipped_reward
+    # anti_goals = emergency_xy[nearest_agent_ids.ravel()].reshape(num_envs, num_agents, 2)
+    # valid_mask = anti_goals[..., 0] & anti_goals[..., 1]
+    # anti_goal_reward = np.linalg.norm(anti_goals - env_agents_pos, axis=2) * valid_mask
+
 
 
 @njit
@@ -489,6 +500,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.step_count = 0
         self.rl_update_interval = max(1, self.num_envs // 10)
         self.reward_mode = self.model_arch_args['reward_mode']
+        self.intrinsic_mode = self.model_arch_args['intrinsic_mode']
         self.fail_hint = self.model_arch_args['fail_hint']
         self.train_count = 0
         # self.anti_reward_sync_count = 0
@@ -939,19 +951,19 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 self.step_count += self.episode_length * self.num_envs
             self.last_virtual_obs = input_dict['obs']['obs']['agents_state']
             if self.sibling_rivalry:
+                if self.buffer_in_obs:
+                    raise NotImplementedError("Buffer in obs is not implemented for sibling rivalry")
                 if not_dummy_batch:
-                    valid_mask = (self.assign_status != -1) & (target_coverage[::self.n_agents] == 0)
-                    env_id, emergency_index = np.nonzero(valid_mask)
-                    new_anti_goal_reward = np.zeros((self.num_envs, self.n_agents), dtype=np.float32)
-                    if len(env_id) > 0:
-                        others_target_as_anti_goal(
-                            new_anti_goal_reward,
-                            self.assign_status,
-                            env_agents_pos,
-                            env_id,
-                            emergency_index,
-                        )
-                    self.last_anti_goal_reward = new_anti_goal_reward.ravel()
+                    # valid_mask = (self.assign_status != -1) & (target_coverage[::self.n_agents] == 0)
+                    # env_id, emergency_index = np.nonzero(valid_mask)
+                    # if len(env_id) > 0:
+                    new_anti_goal_reward = others_target_as_anti_goal(
+                        env_agents_pos,
+                        all_obs[..., self.status_dim:self.status_dim + self.emergency_dim].cpu().numpy(),
+                    )
+                    self.last_anti_goal_reward = new_anti_goal_reward
+                    # else:
+                    #     self.last_anti_goal_reward = np.zeros(self.num_envs * self.n_agents)
                     # self.anti_goal_reward[timestep] = new_anti_goal_reward
                 else:
                     self.last_anti_goal_reward = np.zeros(all_obs.shape[0])
@@ -1139,11 +1151,11 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 # save the obs, action and reward for assignment agent.
                 if len(obs_list) > 0:
                     construct_dict = {
-                                SampleBatch.OBS: np.vstack(obs_list),
-                                SampleBatch.ACTIONS: np.array(action_list, dtype=np.int32),
-                                'invalid_mask': np.array(invalid_mask_list, dtype=np.bool_),
-                                SampleBatch.REWARDS: np.full_like(action_list, -1, dtype=np.float32),
-                            }
+                        SampleBatch.OBS: np.vstack(obs_list),
+                        SampleBatch.ACTIONS: np.array(action_list, dtype=np.int32),
+                        'invalid_mask': np.array(invalid_mask_list, dtype=np.bool_),
+                        SampleBatch.REWARDS: np.full_like(action_list, -1, dtype=np.float32),
+                    }
                     if self.rl_use_cnn:
                         construct_dict[Constants.IMAGE_STATE] = torch.cat(state_grid_list, dim=0).cpu().numpy()
                     self.last_rl_transitions[i].append(SampleBatch(construct_dict))
