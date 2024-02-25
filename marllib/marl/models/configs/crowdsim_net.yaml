@@ -29,3 +29,17 @@ num_envs: 500
 with_task_allocation: True
 separate_encoder: False
 selector_type: 'NN'
+agent_selector_arch:
+  custom_model_config:
+    model_arch_args:
+      core_arch: mlp
+      fc_layer: 3
+      out_dim_fc_0: 64
+      out_dim_fc_1: 128
+      out_dim_fc_2: 64
+      conv_layer: 1
+      out_channel_layer_0: 8
+      kernel_size_layer_0: 3
+      stride_layer_0: 1
+      padding_layer_0: 2
+      pool_size_layer_0: 3
