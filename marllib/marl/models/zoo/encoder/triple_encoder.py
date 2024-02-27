@@ -1,8 +1,13 @@
+from collections import deque
+from typing import List, Dict
+
 import numpy as np
 from gym import spaces
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
 from ray.rllib.models.torch.misc import SlimFC, normc_initializer
 from ray.rllib.utils import try_import_torch
+from ray.rllib.utils.torch_ops import FLOAT_MIN
+from ray.rllib.utils.typing import TensorType
 
 torch, nn = try_import_torch()
 from warp_drive.utils.constants import Constants
@@ -27,23 +32,72 @@ class TripleHeadEncoder(nn.Module):
         }))
         emergency_obs_space = dict(obs=spaces.Box(low=0, high=2, shape=(self.emergency_dim,), dtype=np.float32))
         self.status_grid_encoder = BaseEncoder(self.model_arch_args['status_encoder'], status_grid_space)
-        self.emergency_encoder = BaseEncoder(self.model_arch_args['emergency_encoder'], emergency_obs_space)
+        emergency_encoder_arch_args = self.model_arch_args['emergency_encoder']['custom_model_config'][
+            'model_arch_args']
+        self.emergency_encoder_arch = emergency_encoder_arch_args['core_arch']
+        if self.emergency_encoder_arch == 'mlp':
+            self.emergency_encoder = BaseEncoder(emergency_encoder_arch_args, emergency_obs_space)
+        elif self.emergency_encoder_arch == 'attention':
+            emergency_encoder_arch_args['emergency_queue_length'] = model_arch_args['emergency_queue_length']
+            emergency_encoder_arch_args['agents_state_dim'] = status_grid_space['obs']['agents_state'].shape[0]
+            self.emergency_encoder = CrowdSimAttention(emergency_encoder_arch_args)
+        else:
+            raise ValueError(f"Emergency encoder architecture {self.emergency_encoder_arch} not supported.")
         self.output_dim = self.emergency_encoder.output_dim + self.status_grid_encoder.output_dim
-        # Merge the three branches
-        # self.merge_branch = SlimFC(
-        #     in_size=full_feature_output,
-        #     out_size=self.custom_config["hidden_state_size"],
-        #     initializer=normc_initializer(1.0),
-        #     activation_fn=self.activation,
-        # )
 
     def forward(self, inputs):
         status = inputs[Constants.VECTOR_STATE][..., :-self.emergency_dim]
         emergency = inputs[Constants.VECTOR_STATE][..., -self.emergency_dim:]
         output = self.status_grid_encoder({Constants.VECTOR_STATE: status,
                                            Constants.IMAGE_STATE: inputs[Constants.IMAGE_STATE]})
-        emergency_embedding = self.emergency_encoder(emergency)
+        if self.emergency_encoder_arch == 'mlp':
+            emergency_embedding = self.emergency_encoder(emergency)
+        else:
+            emergency_embedding, weights_matrix = self.emergency_encoder(
+                {Constants.VECTOR_STATE: status, 'emergency': emergency})
         status_embedding, grid_embedding = output[..., :self.status_grid_encoder.dims[0]], \
             output[..., self.status_grid_encoder.dims[0]:]
         # x = self.merge_branch(torch.cat((status_embedding, emergency, grid_embedding), dim=-1))
         return torch.cat((status_embedding, emergency_embedding, grid_embedding), dim=-1)
+
+
+class CrowdSimAttention(nn.Module):
+    """
+    Attention Mechanism designed to select important emergency
+    """
+
+    def __init__(
+            self,
+            model_config,
+    ):
+        nn.Module.__init__(self)
+        self.embedding_dim = model_config['embedding_dim']
+        self.emergency_queue_length = model_config['emergency_queue_length']
+        self.agents_state_dim = model_config['agents_state_dim']
+        self.emergency_feature = 2
+        self.num_heads = model_config['num_heads']
+        self.keys_fc = SlimFC(
+            in_size=self.emergency_queue_length * self.emergency_feature,
+            out_size=self.embedding_dim,
+            initializer=normc_initializer(0.01),
+            activation_fn=None)
+        self.values_fc = SlimFC(
+            in_size=self.emergency_queue_length * self.emergency_feature,
+            out_size=self.embedding_dim,
+            initializer=normc_initializer(0.01),
+            activation_fn=None)
+        self.query_fc = SlimFC(
+            in_size=self.agents_state_dim,
+            out_size=self.embedding_dim,
+            initializer=normc_initializer(0.01),
+            activation_fn=None)
+        self.attention = nn.MultiheadAttention(self.embedding_dim, self.num_heads)
+        self.output_dim = self.embedding_dim
+
+    def forward(self, input_dict: Dict[str, TensorType]) -> (TensorType, List[TensorType]):
+        agents_state, emgergency = tuple(input_dict.values())
+        agents_embedding = self.query_fc(agents_state)
+        key_embedding = self.keys_fc(emgergency)
+        value_embedding = self.values_fc(emgergency)
+        attn_outputs, attn_output_weights = self.attention(agents_embedding, key_embedding, value_embedding)
+        return attn_outputs, attn_output_weights

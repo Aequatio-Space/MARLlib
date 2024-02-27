@@ -38,8 +38,6 @@ model_arch_args:
   emergency_encoder:
     custom_model_config:
       model_arch_args:
-        core_arch: mlp
-        fc_layer: 3
-        out_dim_fc_0: 32
-        out_dim_fc_1: 32
-        out_dim_fc_2: 32
+        core_arch: attention
+        num_heads: 2
+        embedding_dim: 32
