@@ -462,7 +462,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.device = torch.device("cpu")
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.selector_type = (self.model_arch_args['selector_type'] or self.custom_config["selector_type"])
+        self.selector_type = self.model_arch_args['selector_type']
         self.separate_encoder = (self.model_arch_args["separate_encoder"] or self.custom_config["separate_encoder"])
         self.local_mode = self.model_arch_args['local_mode']
         self.num_envs = self.custom_config["num_envs"] if not self.local_mode else 10
@@ -502,11 +502,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.reward_mode = self.model_arch_args['reward_mode']
         self.intrinsic_mode = self.model_arch_args['intrinsic_mode']
         self.fail_hint = self.model_arch_args['fail_hint']
+        self.use_random = self.model_arch_args['use_random']
         self.train_count = 0
         # self.anti_reward_sync_count = 0
         emergency_path_name = os.path.join(get_project_root(), 'datasets',
                                            self.dataset_name, 'emergency_time_loc_1400_1430.csv')
-        if os.path.exists(emergency_path_name):
+        if os.path.exists(emergency_path_name) and (not self.use_random):
             self.unique_emergencies = pd.read_csv(emergency_path_name)
             self.emergency_count = len(self.unique_emergencies)
         else:

@@ -184,40 +184,40 @@ def label_done_masks_and_calculate_gae_for_sample_batch(
     status_dim = policy.model.status_dim
     emergency_dim = policy.model.emergency_feature_dim
     if 'NN' in policy.model.selector_type:
-    # check whether numbers between status_dim:status_dim + emergency_dim are all zeros, one row per value
-    emergency_obs = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
-    no_emergency_mask = np.nansum(np.abs(emergency_obs), axis=1) == 0
-    emergencies_masks = []
-    separate_batches = []
-    last_index = 0
-    try:
-        raw_rewards = sample_batch['original_rewards']
-    except KeyError:
-        raw_rewards = sample_batch[SampleBatch.REWARDS]
-    separate_result = get_start_indices_of_segments(emergency_obs)
-    for index in separate_result[1:]:
-        separate_batches.append(sample_batch[last_index:index + 1].copy())
-        emergencies_masks.append(no_emergency_mask[last_index:index + 1])
-        last_index = index + 1
-    if len(separate_batches) == 0:
-        sample_batch['labels'] = np.where(no_emergency_mask, 1, -1)
-        return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
-    if last_index < len(raw_rewards):
-        separate_batches.append(sample_batch[last_index:].copy())
-        emergencies_masks.append(no_emergency_mask[last_index:])
-    labeled_batches = []
-    length = len(separate_batches)
-    for i, (mask, batch) in enumerate(zip(emergencies_masks, separate_batches)):
-        batch_length = len(batch[SampleBatch.REWARDS])
-        if i != length - 1:
-            labels = np.arange(start=batch_length, stop=0, step=-1) / episode_length
-            batch['labels'] = np.where(mask, labels, -1)
-        else:
-            batch['labels'] = np.full(batch_length,
-                                      -1)  # discard last batch by default since it contains truncated result.
-        labeled_batches.append(batch)
-        # labeled_batches.append(compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode))
-    full_batch = SampleBatch.concat_samples(labeled_batches)
+        # check whether numbers between status_dim:status_dim + emergency_dim are all zeros, one row per value
+        emergency_obs = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
+        no_emergency_mask = np.nansum(np.abs(emergency_obs), axis=1) == 0
+        emergencies_masks = []
+        separate_batches = []
+        last_index = 0
+        try:
+            raw_rewards = sample_batch['original_rewards']
+        except KeyError:
+            raw_rewards = sample_batch[SampleBatch.REWARDS]
+        separate_result = get_start_indices_of_segments(emergency_obs)
+        for index in separate_result[1:]:
+            separate_batches.append(sample_batch[last_index:index + 1].copy())
+            emergencies_masks.append(no_emergency_mask[last_index:index + 1])
+            last_index = index + 1
+        if len(separate_batches) == 0:
+            sample_batch['labels'] = np.where(no_emergency_mask, 1, -1)
+            return compute_gae_for_sample_batch(policy, sample_batch, other_agent_batches, episode)
+        if last_index < len(raw_rewards):
+            separate_batches.append(sample_batch[last_index:].copy())
+            emergencies_masks.append(no_emergency_mask[last_index:])
+        labeled_batches = []
+        length = len(separate_batches)
+        for i, (mask, batch) in enumerate(zip(emergencies_masks, separate_batches)):
+            batch_length = len(batch[SampleBatch.REWARDS])
+            if i != length - 1:
+                labels = np.arange(start=batch_length, stop=0, step=-1) / episode_length
+                batch['labels'] = np.where(mask, labels, -1)
+            else:
+                batch['labels'] = np.full(batch_length,
+                                          -1)  # discard last batch by default since it contains truncated result.
+            labeled_batches.append(batch)
+            # labeled_batches.append(compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode))
+        full_batch = SampleBatch.concat_samples(labeled_batches)
     else:
         full_batch = sample_batch
     return compute_gae_for_sample_batch(policy, full_batch, other_agent_batches, episode)
@@ -389,14 +389,13 @@ def calculate_intrinsic(agents_position: np.ndarray,
     calculate the intrinsic reward for each agent, which is the product of distance and aoi.
     """
     # mask out penalty where emergency_positions are (0,0), which indicates the agent is not in the emergency.
-
+    distances = np.linalg.norm(agents_position - emergency_position, axis=1)
     mask = emergency_position.sum(axis=-1) != 0
     # find [aoi, (x,y)] array in state
     if not fake:
         if mode == 'none':
             return np.zeros(len(agents_position))
         else:
-            distances = np.linalg.norm(agents_position - emergency_position, axis=1)
             if mode == 'dis':
                 return -distances * mask
             else:
