@@ -120,78 +120,51 @@ def relabel_for_sample_batch(
         sample_batch[SampleBatch.OBS][..., :status_dim + emergency_dim] = virtual_obs
     except KeyError:
         pass
-    extra_batches = [sample_batch.copy() for _ in range(k)]
-    future_multi_goal_relabeling(extra_batches, goal_number, num_agents, sample_batch, policy)
-    this_emergency_count = policy.model.emergency_count
-    observation = sample_batch[SampleBatch.OBS]
-    emergency_states = get_emergency_state(emergency_dim, sample_batch, num_agents, status_dim, this_emergency_count)
-    agents_position = observation[..., num_agents + 2: num_agents + 4]
-    num_envs = policy.model.num_envs
-    if use_intrinsic:
-        if policy.model.buffer_in_obs:
-            emergency_position = observation[..., status_dim:status_dim + emergency_feature_dim]
-        else:
-            emergency_position = observation[..., status_dim:status_dim + emergency_dim]
-        if use_distance_intrinsic:
-            if policy.model.sibling_rivalry:
-                assert ANTI_GOAL_REWARD in sample_batch, ANTI_GOAL_REWARD + " is not in sample_batch."
-                anti_goal_distances = sample_batch[ANTI_GOAL_REWARD]
-            else:
-                anti_goal_distances = None
-            intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
-                                            emergency_threshold=policy.model.emergency_threshold,
-                                            anti_goal_distances=anti_goal_distances,
-                                            alpha=policy.model.alpha, mode=policy.model.intrinsic_mode)
-        else:
-            assert 'NN' == selector_type[0] and len(
-                selector_type) == 1, "only NN selector supports bootstrapping reward."
-            inputs = torch.from_numpy(observation[..., :status_dim + emergency_dim]).float()
-            agent_metric_estimations = policy.model.selector(inputs.to(policy.model.device))
-            if len(agent_metric_estimations) > 0:
-                agent_metric_estimations = agent_metric_estimations.squeeze(-1)
-            age_of_informations = emergency_states[..., 2]
-            mask = emergency_position.sum(axis=-1) != 0
-            all_emergencies_position = np.stack([emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
-            indices = match_aoi(all_emergencies_position, emergency_position, mask)
-            intrinsic = -agent_metric_estimations.cpu().numpy()
-            intrinsic *= (mask * age_of_informations[np.arange(len(age_of_informations)), indices])
-        # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
-        sample_batch[ORIGINAL_REWARDS] = deepcopy(sample_batch[SampleBatch.REWARDS])
-        sample_batch['intrinsic_rewards'] = intrinsic
-        if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
-            sample_batch[SampleBatch.REWARDS] += torch.from_numpy(intrinsic)
-        else:
-            sample_batch[SampleBatch.REWARDS] += intrinsic
-    # return label_done_masks_and_calculate_gae_for_sample_batch(policy,
-    #                                                            sample_batch,
-    #                                                            other_agent_batches,
-    #                                                            episode
-    #                                                            )
-    postprocess_batches = [label_done_masks_and_calculate_gae_for_sample_batch(policy, sample_batch,
-                                                                               other_agent_batches, episode)]
-    for batch in extra_batches:
-        # must copy a batch since the input dict will be equipped with torch interceptor.
-        _ = policy.compute_actions_from_input_dict(batch.copy())
-        batch.update(policy.extra_action_out(batch, [], policy.model, None))
+    if policy.model.with_task_allocation:
+        this_emergency_count = policy.model.emergency_count
+        observation = sample_batch[SampleBatch.OBS]
+        emergency_states = get_emergency_state(emergency_dim, sample_batch, num_agents, status_dim,
+                                               this_emergency_count)
+        agents_position = observation[..., num_agents + 2: num_agents + 4]
+        num_envs = policy.model.num_envs
         if use_intrinsic:
-            if use_large_emergency:
-                # Extract non-zero elements
-                emergency_matrix = batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
-                emergency_position = np.zeros_like(agents_position)
-                for i in range(len(emergency_position)):
-                    indices = np.nonzero(emergency_matrix[i])[0]
-                    if len(indices) != 0:
-                        emergency_position[i] = emergency_matrix[i][indices]
+            if policy.model.buffer_in_obs:
+                emergency_position = observation[..., status_dim:status_dim + emergency_feature_dim]
             else:
-                emergency_matrix = emergency_position = batch[SampleBatch.OBS][...,
-                                                        status_dim:status_dim + emergency_dim]
-            # Reshape the array into the desired format
-            if emergency_matrix.shape[0] != 0:
-                modify_batch_with_intrinsic(agents_position, emergency_position, emergency_states, batch)
-        # new_batch = compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
-        new_batch = label_done_masks_and_calculate_gae_for_sample_batch(policy, batch, other_agent_batches, episode)
-        postprocess_batches.append(new_batch)
-    return SampleBatch.concat_samples(postprocess_batches)
+                emergency_position = observation[..., status_dim:status_dim + emergency_dim]
+            if use_distance_intrinsic:
+                if policy.model.sibling_rivalry:
+                    assert ANTI_GOAL_REWARD in sample_batch, ANTI_GOAL_REWARD + " is not in sample_batch."
+                    anti_goal_distances = sample_batch[ANTI_GOAL_REWARD]
+                else:
+                    anti_goal_distances = None
+                intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
+                                                emergency_threshold=policy.model.emergency_threshold,
+                                                anti_goal_distances=anti_goal_distances,
+                                                alpha=policy.model.alpha, mode=policy.model.intrinsic_mode)
+            else:
+                assert 'NN' == selector_type[0] and len(
+                    selector_type) == 1, "only NN selector supports bootstrapping reward."
+                inputs = torch.from_numpy(observation[..., :status_dim + emergency_dim]).float()
+                agent_metric_estimations = policy.model.selector(inputs.to(policy.model.device))
+                if len(agent_metric_estimations) > 0:
+                    agent_metric_estimations = agent_metric_estimations.squeeze(-1)
+                age_of_informations = emergency_states[..., 2]
+                mask = emergency_position.sum(axis=-1) != 0
+                all_emergencies_position = np.stack([emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
+                indices = match_aoi(all_emergencies_position, emergency_position, mask)
+                intrinsic = -agent_metric_estimations.cpu().numpy()
+                intrinsic *= (mask * age_of_informations[np.arange(len(age_of_informations)), indices])
+            # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
+            sample_batch[ORIGINAL_REWARDS] = deepcopy(sample_batch[SampleBatch.REWARDS])
+            sample_batch['intrinsic_rewards'] = intrinsic
+            if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
+                sample_batch[SampleBatch.REWARDS] += torch.from_numpy(intrinsic)
+            else:
+                sample_batch[SampleBatch.REWARDS] += intrinsic
+    return label_done_masks_and_calculate_gae_for_sample_batch(policy, sample_batch,
+                                                               other_agent_batches, episode)
+
     # try, send relabeled trajectory only.
 
 
@@ -210,7 +183,7 @@ def label_done_masks_and_calculate_gae_for_sample_batch(
         episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
     status_dim = policy.model.status_dim
     emergency_dim = policy.model.emergency_feature_dim
-
+    if 'NN' in policy.model.selector_type:
     # check whether numbers between status_dim:status_dim + emergency_dim are all zeros, one row per value
     emergency_obs = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
     no_emergency_mask = np.nansum(np.abs(emergency_obs), axis=1) == 0
@@ -245,6 +218,8 @@ def label_done_masks_and_calculate_gae_for_sample_batch(
         labeled_batches.append(batch)
         # labeled_batches.append(compute_gae_for_sample_batch(policy, batch, other_agent_batches, episode))
     full_batch = SampleBatch.concat_samples(labeled_batches)
+    else:
+        full_batch = sample_batch
     return compute_gae_for_sample_batch(policy, full_batch, other_agent_batches, episode)
 
 
@@ -482,7 +457,7 @@ def add_auxiliary_loss(
     this_emergency_count = policy.model.emergency_count
     emergency_dim = policy.model.emergency_dim
     emergency_feature_dim = policy.model.emergency_feature_dim
-    if hasattr(model, "selector_type") and 'NN' in model.selector_type:
+    if hasattr(model, "selector_type") and 'NN' in model.selector_type and model.with_task_allocation:
         batch_size = 32
         learning_rate = 0.001 if model.render is False else 0
         epochs = 1
@@ -527,7 +502,7 @@ def add_auxiliary_loss(
     model.tower_stats['mean_regress_loss'] = mean_loss
     lower_agent_batches = train_batch.split_by_episode()
     logging.debug("Switch Step Status: %s", model.step_count > model.switch_step)
-    if hasattr(model, "selector_type") and 'RL' in model.selector_type:
+    if hasattr(model, "selector_type") and 'RL' in model.selector_type and model.with_task_allocation:
         parameters_list = [item for item in model.selector.parameters()]
         mean_reward = torch.tensor(0.0).to(device)
         if len(parameters_list) > 0 and model.step_count > model.switch_step:
@@ -596,7 +571,8 @@ def add_auxiliary_loss(
         logging.debug(f"RL Mean Reward: {mean_reward.item()}")
         model.tower_stats['mean_rl_loss'] = mean_loss
         model.tower_stats['mean_assign_reward'] = mean_reward
-    model.tower_stats['mean_intrinsic_rewards'] = torch.mean(train_batch['intrinsic_rewards'])
+    if model.with_task_allocation:
+        model.tower_stats['mean_intrinsic_rewards'] = torch.mean(train_batch['intrinsic_rewards'])
     model.train()
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
     model.eval()
@@ -677,12 +653,12 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
     # construct a dict from emergency_xy
     emergency_dict = {(x, y): i for i, (x, y) in enumerate(emergency_xy)}
     lower_level_dict = {(x, y): i for i, (x, y) in enumerate(selected_emergencies)}
-    fail_penalty = -EMERGENCY_REWARD_INCREMENT // 10
+    # fail_penalty = -EMERGENCY_REWARD_INCREMENT // 10
     for i, (action, emergency) in enumerate(zip(assign_actions, allocation_list)):
+        distances = np.linalg.norm(agents_pos[i] - emergency, axis=1)
+        discount_factor = np.zeros(len(distances))
+        discount_factor[np.argsort(distances)] = np.linspace(1 / len(distances), 1, len(distances))
         if mode == 'greedy':
-            distances = np.linalg.norm(agents_pos[i] - emergency, axis=1)
-            discount_factor = np.zeros(len(distances))
-            discount_factor[np.argsort(distances)] = np.linspace(1 / len(distances), 1, len(distances))
             emergency_cover_reward = 1 - discount_factor[action]
         else:
             coordinates_tuple = (emergency[0], emergency[1])
@@ -704,7 +680,8 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
                         mean_reward = 0.0
                     if np.isnan(mean_reward):
                         mean_reward = 0
-                emergency_cover_reward = mean_reward + (assignment_status[emergency_index] == action)
+                # emergency_cover_reward = mean_reward + (assignment_status[emergency_index] == action)
+                emergency_cover_reward = mean_reward * (1 - discount_factor[action])
                 logging.debug(f"delta: {delta}, mean_reward: {mean_reward}, with_emergency: {emergency_cover_reward}")
         assign_rewards[i] = emergency_cover_reward
 
@@ -799,8 +776,10 @@ def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
     extra_dict = vf_preds_fetches(policy, input_dict, state_batches, model, action_dist)
     if hasattr(model, "with_task_allocation") and model.with_task_allocation:
         extra_dict[VIRTUAL_OBS] = model.last_virtual_obs.cpu().numpy()
-    if hasattr(model, "sibling_rivalry") and model.sibling_rivalry:
-        extra_dict[ANTI_GOAL_REWARD] = model.last_anti_goal_reward
+        if hasattr(model, "sibling_rivalry") and model.sibling_rivalry:
+            extra_dict[ANTI_GOAL_REWARD] = model.last_anti_goal_reward
+        if hasattr(model.p_encoder, "last_weight_matrix"):
+            extra_dict['weight_matrix'] = model.p_encoder.last_weight_matrix
     return extra_dict
 
 
@@ -811,19 +790,20 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
     """
     original_dict = kl_and_loss_stats(policy, train_batch)
     #  'label_count', 'valid_fragment_length', 'relabel_percentage'
-    for item in ['regress_loss', 'intrinsic_rewards']:
-        original_dict[item] = torch.mean(torch.stack(policy.get_tower_stats("mean_" + item)))
-    for model in policy.model_gpu_towers:
-        if 'RL' in model.selector_type:
-            original_dict['assign_reward'] = torch.mean(torch.stack(policy.get_tower_stats("mean_assign_reward")))
-            original_dict['rl_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_rl_loss")))
-        if model.last_emergency_mode is not None:
-            for i in range(model.n_agents):
-                original_dict[f'agent_{i}_mode'] = model.last_emergency_mode[i]
-                original_dict[f'agent_{i}_target_x'] = model.last_emergency_target[i][0]
-                original_dict[f'agent_{i}_target_y'] = model.last_emergency_target[i][1]
-                original_dict[f'agent_{i}_queue_length'] = model.last_emergency_queue_length[i]
-        break
+    if policy.model.with_task_allocation:
+        for item in ['regress_loss', 'intrinsic_rewards']:
+            original_dict[item] = torch.mean(torch.stack(policy.get_tower_stats("mean_" + item)))
+        for model in policy.model_gpu_towers:
+            if 'RL' in model.selector_type:
+                original_dict['assign_reward'] = torch.mean(torch.stack(policy.get_tower_stats("mean_assign_reward")))
+                original_dict['rl_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_rl_loss")))
+            if model.last_emergency_mode is not None:
+                for i in range(model.n_agents):
+                    original_dict[f'agent_{i}_mode'] = model.last_emergency_mode[i]
+                    original_dict[f'agent_{i}_target_x'] = model.last_emergency_target[i][0]
+                    original_dict[f'agent_{i}_target_y'] = model.last_emergency_target[i][1]
+                    original_dict[f'agent_{i}_queue_length'] = model.last_emergency_queue_length[i]
+            break
     return original_dict
 
 

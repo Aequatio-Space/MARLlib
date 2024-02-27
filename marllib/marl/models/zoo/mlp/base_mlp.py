@@ -452,11 +452,11 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.custom_config = model_config["custom_model_config"]
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
-        self.with_task_allocation = self.custom_config["with_task_allocation"]
         self.status_dim = self.custom_config["status_dim"]
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
         self.activation = model_config.get("fcnet_activation")
         self.model_arch_args = self.custom_config['model_arch_args']
+        self.with_task_allocation = self.model_arch_args['dynamic_zero_shot']
         logging.debug(f"CrowdSimNet model_arch_args: {pprint.pformat(self.model_arch_args)}")
         if self.model_arch_args['local_mode']:
             self.device = torch.device("cpu")
@@ -1065,8 +1065,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                     device=self.device)
         non_empty_buffers = torch.nonzero(env_buffer_lens.flatten() > 0)
         for i in non_empty_buffers:
+            if self.prioritized_buffer:
+                indices = my_emergency_buffer[i].tolist()
+            else:
+                indices = list(my_emergency_buffer[i])
             all_buffer_xy[i, :env_buffer_lens[i // self.n_agents, i % self.n_agents] * 2] = \
-                torch.from_numpy(emergency_xy[list(my_emergency_buffer[i])].flatten()).to(self.device)
+                torch.from_numpy(emergency_xy[indices].flatten()).to(self.device)
         if len(env_valid_emergencies) == 0:
             return
         for i in range(self.num_envs):
@@ -1174,7 +1178,11 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 self.emergency_mode[i] = 1
                 if self.buffer_in_obs:
                     buffer_as_obs = torch.zeros(self.emergency_dim, device=self.device)
-                    buffer_as_obs[:my_len * 2] = torch.from_numpy(emergency_xy[list(buffer)].ravel())
+                    if self.prioritized_buffer:
+                        indices = buffer.tolist()
+                    else:
+                        indices = list(buffer)
+                    buffer_as_obs[:my_len * 2] = torch.from_numpy(emergency_xy[indices].ravel())
                     all_obs[i][self.status_dim:self.status_dim + self.emergency_dim] = buffer_as_obs
                 else:
                     all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \

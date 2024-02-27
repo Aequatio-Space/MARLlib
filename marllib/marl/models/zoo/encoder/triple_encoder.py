@@ -23,6 +23,7 @@ class TripleHeadEncoder(nn.Module):
         self.custom_config = custom_model_config
         self.model_arch_args = model_arch_args
         self.obs_space = obs_space
+        self.last_weight_matrix = None
         self.activation = self.custom_config.get("fcnet_activation")
         self.emergency_dim = self.custom_config['emergency_dim']
         # Two encoders, one for image and vector input, one for vector input.
@@ -55,6 +56,7 @@ class TripleHeadEncoder(nn.Module):
         else:
             emergency_embedding, weights_matrix = self.emergency_encoder(
                 {Constants.VECTOR_STATE: status, 'emergency': emergency})
+            self.last_weight_matrix = weights_matrix
         status_embedding, grid_embedding = output[..., :self.status_grid_encoder.dims[0]], \
             output[..., self.status_grid_encoder.dims[0]:]
         # x = self.merge_branch(torch.cat((status_embedding, emergency, grid_embedding), dim=-1))
@@ -77,12 +79,12 @@ class CrowdSimAttention(nn.Module):
         self.emergency_feature = 2
         self.num_heads = model_config['num_heads']
         self.keys_fc = SlimFC(
-            in_size=self.emergency_queue_length * self.emergency_feature,
+            in_size=self.emergency_feature,
             out_size=self.embedding_dim,
             initializer=normc_initializer(0.01),
             activation_fn=None)
         self.values_fc = SlimFC(
-            in_size=self.emergency_queue_length * self.emergency_feature,
+            in_size=self.emergency_feature,
             out_size=self.embedding_dim,
             initializer=normc_initializer(0.01),
             activation_fn=None)
@@ -91,13 +93,15 @@ class CrowdSimAttention(nn.Module):
             out_size=self.embedding_dim,
             initializer=normc_initializer(0.01),
             activation_fn=None)
-        self.attention = nn.MultiheadAttention(self.embedding_dim, self.num_heads)
+        self.attention = nn.MultiheadAttention(self.embedding_dim, self.num_heads, batch_first=True)
         self.output_dim = self.embedding_dim
 
     def forward(self, input_dict: Dict[str, TensorType]) -> (TensorType, List[TensorType]):
-        agents_state, emgergency = tuple(input_dict.values())
-        agents_embedding = self.query_fc(agents_state)
-        key_embedding = self.keys_fc(emgergency)
-        value_embedding = self.values_fc(emgergency)
+        agents_state, emergency = tuple(input_dict.values())
+        agents_embedding = self.query_fc(agents_state.unsqueeze(1))
+        emergency = emergency.reshape(agents_state.shape[0], -1, 2)
+        key_embedding = self.keys_fc(emergency)
+        # change embedding dim.
+        value_embedding = self.values_fc(emergency)
         attn_outputs, attn_output_weights = self.attention(agents_embedding, key_embedding, value_embedding)
-        return attn_outputs, attn_output_weights
+        return attn_outputs.squeeze(1), attn_output_weights.squeeze(1)
