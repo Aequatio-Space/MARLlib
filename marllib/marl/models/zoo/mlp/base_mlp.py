@@ -226,7 +226,7 @@ class Predictor(nn.Module):
                 in_size=hidden_size,
                 out_size=output_dim,
                 initializer=normc_initializer(0.01),
-                activation_fn=nn.Sigmoid),
+                activation_fn=None),
             # activation_fn=None),
         )
 
@@ -478,12 +478,20 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.look_ahead = self.model_arch_args['look_ahead']
         self.rl_use_cnn = self.model_arch_args['rl_use_cnn']
         self.emergency_queue_length = self.model_arch_args['emergency_queue_length']
+        self.intrinsic_mode = self.model_arch_args['intrinsic_mode']
         self.buffer_in_obs = self.model_arch_args['buffer_in_obs']
         self.prioritized_buffer = self.model_arch_args['prioritized_buffer']
         if self.buffer_in_obs:
             self.emergency_dim = self.emergency_queue_length * self.emergency_feature_dim
         else:
             self.emergency_dim = self.emergency_feature_dim
+        self.use_aim = self.intrinsic_mode == 'aim'
+        if self.use_aim:
+            input_dim = self.full_obs_space['obs']['agents_state'].shape[0]
+            self.discriminator = Predictor(input_dim).to(self.device)
+            self.optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=0.001)
+            self.reward_max = 1
+            self.reward_min = 0
         self.custom_config['emergency_dim'] = self.emergency_dim
 
         if 'checkpoint_path' in self.model_arch_args:
@@ -500,7 +508,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.step_count = 0
         self.rl_update_interval = max(1, self.num_envs // 10)
         self.reward_mode = self.model_arch_args['reward_mode']
-        self.intrinsic_mode = self.model_arch_args['intrinsic_mode']
         self.fail_hint = self.model_arch_args['fail_hint']
         self.use_random = self.model_arch_args['use_random']
         self.train_count = 0

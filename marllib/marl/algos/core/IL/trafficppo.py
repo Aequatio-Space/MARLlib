@@ -106,7 +106,8 @@ def relabel_for_sample_batch(
     goal_number = 5
     use_intrinsic = True
     selector_type = policy.model.selector_type
-    use_distance_intrinsic = 'NN' not in selector_type or policy.model.step_count < policy.model.switch_step
+    intrinsic_mode = policy.model.intrinsic_mode
+    use_distance_intrinsic = intrinsic_mode != 'aim' or policy.model.step_count < policy.model.switch_step
     # logging.debug("use_distance_intrinsic: %s", use_distance_intrinsic)
     # logging.debug("step_count: %d, switch_step: %d", policy.model.step_count, policy.model.switch_step)
     status_dim = policy.model.status_dim
@@ -143,18 +144,16 @@ def relabel_for_sample_batch(
                                                 anti_goal_distances=anti_goal_distances,
                                                 alpha=policy.model.alpha, mode=policy.model.intrinsic_mode)
             else:
-                assert 'NN' == selector_type[0] and len(
-                    selector_type) == 1, "only NN selector supports bootstrapping reward."
-                inputs = torch.from_numpy(observation[..., :status_dim + emergency_dim]).float()
-                agent_metric_estimations = policy.model.selector(inputs.to(policy.model.device))
-                if len(agent_metric_estimations) > 0:
-                    agent_metric_estimations = agent_metric_estimations.squeeze(-1)
-                age_of_informations = emergency_states[..., 2]
-                mask = emergency_position.sum(axis=-1) != 0
-                all_emergencies_position = np.stack([emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
-                indices = match_aoi(all_emergencies_position, emergency_position, mask)
-                intrinsic = -agent_metric_estimations.cpu().numpy()
-                intrinsic *= (mask * age_of_informations[np.arange(len(age_of_informations)), indices])
+                discriminator: nn.Module = policy.model.discriminator
+                cur_obs = sample_batch[SampleBatch.CUR_OBS][..., :status_dim + emergency_dim]
+                next_obs = sample_batch[SampleBatch.NEXT_OBS][..., :status_dim + emergency_dim]
+                cur_valid_mask = cur_obs[..., status_dim:status_dim + emergency_dim].sum(axis=-1) != 0
+                next_valid_mask = next_obs[..., status_dim:status_dim + emergency_dim].sum(axis=-1) != 0
+                valid_mask = np.logical_and(cur_valid_mask, next_valid_mask)
+                next_obs_potential = discriminator(torch.from_numpy(next_obs).to(policy.model.device))
+                delta = (policy.model.reward_max - policy.model.reward_min)
+                intrinsic = (next_obs_potential.cpu().numpy() - policy.model.reward_max) / delta
+                intrinsic = intrinsic.ravel() * valid_mask
             # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
             sample_batch[ORIGINAL_REWARDS] = deepcopy(sample_batch[SampleBatch.REWARDS])
             sample_batch['intrinsic_rewards'] = intrinsic
@@ -166,6 +165,23 @@ def relabel_for_sample_batch(
                                                                other_agent_batches, episode)
 
     # try, send relabeled trajectory only.
+
+
+def NN_bootstrap_reward(emergency_dim, emergency_position, emergency_states, observation, policy, selector_type,
+                        status_dim):
+    assert 'NN' == selector_type[0] and len(
+        selector_type) == 1, "only NN selector supports bootstrapping reward."
+    inputs = torch.from_numpy(observation[..., :status_dim + emergency_dim]).float()
+    agent_metric_estimations = policy.model.selector(inputs.to(policy.model.device))
+    if len(agent_metric_estimations) > 0:
+        agent_metric_estimations = agent_metric_estimations.squeeze(-1)
+    age_of_informations = emergency_states[..., 2]
+    mask = emergency_position.sum(axis=-1) != 0
+    all_emergencies_position = np.stack([emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
+    indices = match_aoi(all_emergencies_position, emergency_position, mask)
+    intrinsic = -agent_metric_estimations.cpu().numpy()
+    intrinsic *= (mask * age_of_informations[np.arange(len(age_of_informations)), indices])
+    return intrinsic
 
 
 def get_start_indices_of_segments(array):
@@ -456,12 +472,8 @@ def add_auxiliary_loss(
     this_emergency_count = policy.model.emergency_count
     emergency_dim = policy.model.emergency_dim
     emergency_feature_dim = policy.model.emergency_feature_dim
+    selector = model.selector
     if hasattr(model, "selector_type") and 'NN' in model.selector_type and model.with_task_allocation:
-        batch_size = 32
-        learning_rate = 0.001 if model.render is False else 0
-        epochs = 1
-        criterion = nn.MSELoss()
-        optimizer = optim.Adam(model.selector.parameters(), lr=learning_rate)
         observation = train_batch[SampleBatch.OBS]
         try:
             observation[..., :status_dim + emergency_dim] = train_batch[VIRTUAL_OBS]
@@ -469,6 +481,7 @@ def add_auxiliary_loss(
             pass
         inputs = observation[..., :status_dim + emergency_dim]
         labels = train_batch['labels']
+
         # test, greedy label (worked)
         # labels = torch.norm(train_batch[SampleBatch.OBS][..., 20:22] - train_batch[SampleBatch.OBS][..., 6:8], dim=-1)
         # filter out labels with -1
@@ -477,16 +490,21 @@ def add_auxiliary_loss(
         if torch.sum(mask) == 0:
             mean_loss = torch.tensor(0.0)
         else:
-            dataset = torch.utils.data.TensorDataset(inputs[mask].to(torch.float32), labels[mask].to(torch.float32))
-            dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
             mean_loss = torch.tensor(0.0).to(model.device)
-            if torch.sum(inputs) != 0:
+            if torch.sum(inputs[mask]) != 0:
+                batch_size = 32
+                learning_rate = 0.001 if model.render is False else 0
+                epochs = 1
+                criterion = nn.MSELoss()
+                optimizer = optim.Adam(selector.parameters(), lr=learning_rate)
+                dataset = torch.utils.data.TensorDataset(inputs[mask].to(torch.float32), labels[mask].to(torch.float32))
+                dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
                 progress = tqdm(range(epochs))
-                model.selector.train()
+                selector.train()
                 for _ in progress:
                     for batch_observations, batch_distances in dataloader:
                         optimizer.zero_grad()
-                        outputs = model.selector(batch_observations.to(model.device))
+                        outputs = selector(batch_observations.to(model.device))
                         if len(outputs.shape) > 1:
                             outputs = outputs.squeeze()
                         loss = criterion(outputs, batch_distances.to(model.device))
@@ -495,19 +513,53 @@ def add_auxiliary_loss(
                         optimizer.step()
                     progress.set_postfix({'mean_loss': mean_loss.item()})
                 mean_loss /= epochs * len(dataloader)
-                model.selector.eval()
+                selector.eval()
     else:
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
+    if hasattr(model, "use_aim") and model.use_aim and model.with_task_allocation:
+        discriminator: nn.Module = model.discriminator
+        optimizer = model.optimizer
+        discriminator.train()
+        cur_obs = train_batch[SampleBatch.CUR_OBS][..., :status_dim + emergency_dim]
+        next_obs = train_batch[SampleBatch.NEXT_OBS][..., :status_dim + emergency_dim]
+        cur_valid_mask = cur_obs[..., status_dim:status_dim + emergency_dim].sum(axis=-1) != 0
+        next_valid_mask = next_obs[..., status_dim:status_dim + emergency_dim].sum(axis=-1) != 0
+        valid_mask = torch.logical_and(cur_valid_mask, next_valid_mask)
+        if torch.any(valid_mask):
+            logging.debug("valid mask count: %d", torch.sum(valid_mask))
+            optimizer.zero_grad()
+            valid_cur_obs = cur_obs[valid_mask]
+            cur_obs_potential = discriminator(valid_cur_obs)
+            next_obs_potential = discriminator(next_obs[valid_mask])
+            target_obs = valid_cur_obs.clone().detach()
+            # add gaussian noise with mean=0, variance of 0.02
+            target_pos = valid_cur_obs[:, status_dim:status_dim + emergency_dim]
+            noise = torch.normal(mean=0, std=0.02, size=target_pos.shape).to(device)
+            target_obs[:, num_agents + 2: num_agents + 4] = target_pos + noise
+            target_obs_potential = discriminator(target_obs)
+            new_preds = torch.cat([target_obs_potential, next_obs_potential], dim=0)
+            model.reward_max = torch.max(new_preds).detach().cpu().numpy() + 0.1
+            model.reward_min = torch.min(new_preds).detach().cpu().numpy() - 0.1
+            penalty = 10 * torch.max(torch.abs(next_obs_potential - cur_obs_potential) - 0.1,
+                                     torch.tensor(0.0).to(device))
+            wgan_loss = (cur_obs_potential - target_obs_potential + penalty).mean()
+            wgan_loss.backward()
+            optimizer.step()
+        else:
+            wgan_loss = torch.tensor(0.0)
+        model.tower_stats['mean_aim_loss'] = wgan_loss
+    else:
+        pass
     lower_agent_batches = train_batch.split_by_episode()
     logging.debug("Switch Step Status: %s", model.step_count > model.switch_step)
     if hasattr(model, "selector_type") and 'RL' in model.selector_type and model.with_task_allocation:
-        parameters_list = [item for item in model.selector.parameters()]
+        parameters_list = [item for item in selector.parameters()]
         mean_reward = torch.tensor(0.0).to(device)
         if len(parameters_list) > 0 and model.step_count > model.switch_step:
             rl_optimizer = optim.Adam(parameters_list, lr=0.001)
             assert 0 <= model.rl_gamma <= 1, "gamma should be in [0, 1]"
-            model.selector.train()
+            selector.train()
             full_batches = []
             if model.last_rl_transitions is not None:
                 for transitions in model.last_rl_transitions[model.train_count * 10:(model.train_count + 1) * 10]:
@@ -542,10 +594,10 @@ def add_auxiliary_loss(
                     invalid_masks = torch.from_numpy(batch['invalid_mask']).to(device)
                     if model.rl_use_cnn:
                         grids = torch.from_numpy(batch[Constants.IMAGE_STATE]).to(device)
-                        batch_dist: Categorical = Categorical(probs=model.selector(inputs, invalid_mask=invalid_masks,
-                                                                                   grid=grids))
+                        batch_dist: Categorical = Categorical(probs=selector(inputs, invalid_mask=invalid_masks,
+                                                                             grid=grids))
                     else:
-                        batch_dist: Categorical = Categorical(probs=model.selector(inputs, invalid_mask=invalid_masks))
+                        batch_dist: Categorical = Categorical(probs=selector(inputs, invalid_mask=invalid_masks))
                     actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
                     log_probs = batch_dist.log_prob(actions_tensor)
                     loss = torch.mean(-log_probs * discounted_rewards).to(device)
@@ -558,7 +610,7 @@ def add_auxiliary_loss(
                 mean_reward /= length_of_batches
                 mean_loss /= length_of_batches
                 # progress.set_postfix({'loss': mean_loss.item(), 'mean_reward': mean_reward.item()})
-                model.selector.eval()
+                selector.eval()
         if model.train_count == model.rl_update_interval - 1:
             model.train_count = 0
             model.last_rl_transitions = [[] for _ in range(model.num_envs)]
@@ -802,6 +854,10 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
                     original_dict[f'agent_{i}_target_x'] = model.last_emergency_target[i][0]
                     original_dict[f'agent_{i}_target_y'] = model.last_emergency_target[i][1]
                     original_dict[f'agent_{i}_queue_length'] = model.last_emergency_queue_length[i]
+            if hasattr(model, "intrinsic_mode") and model.intrinsic_mode == 'aim':
+                original_dict['aim_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_aim_loss")))
+                original_dict['aim_reward_max'] = model.reward_max
+                original_dict['aim_reward_min'] = model.reward_min
             break
     return original_dict
 
