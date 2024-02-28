@@ -556,16 +556,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
 
         logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
         logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
-        if self.checkpoint_path and not self.render:
-            logging.debug(f"Loading checkpoint from {self.checkpoint_path['model_path']}")
-            model_state = pickle.load(open(self.checkpoint_path['model_path'], 'rb'))
-            worker_state = pickle.loads(model_state['worker'])['state']
-            for _, state in worker_state.items():
-                executor_weights = state['weights']
-                separate_weights = split_first_level(executor_weights)
-                for key, value in separate_weights.items():
-                    getattr(self, key).load_state_dict(value)
-                break
         # Holds the current "base" output (before logits layer).
         self._features = None
         # Holds the last input, in case value branch is separate.
@@ -629,6 +619,16 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                               self.n_agents,
                                               self.emergency_queue_length * self.emergency_feature_in_buffer],
                                              dtype=np.float32, fill_value=-1.0)
+        if self.checkpoint_path and not self.render:
+            logging.debug(f"Loading checkpoint from {self.checkpoint_path['model_path']}")
+            model_state = pickle.load(open(self.checkpoint_path['model_path'], 'rb'))
+            worker_state = pickle.loads(model_state['worker'])['state']
+            for _, state in worker_state.items():
+                executor_weights = state['weights']
+                separate_weights = split_first_level(executor_weights)
+                for key, value in separate_weights.items():
+                    getattr(self, key).load_state_dict(value)
+                break
         if wandb.run is not None:
             wandb.watch(models=tuple(self.actors), log='all')
 

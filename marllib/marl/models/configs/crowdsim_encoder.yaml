@@ -40,4 +40,4 @@ model_arch_args:
       model_arch_args:
         core_arch: attention
         num_heads: 2
-        embedding_dim: 32
+        embedding_dim: 128

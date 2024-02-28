@@ -41,6 +41,9 @@ class TripleHeadEncoder(nn.Module):
         elif self.emergency_encoder_arch == 'attention':
             emergency_encoder_arch_args['emergency_queue_length'] = model_arch_args['emergency_queue_length']
             emergency_encoder_arch_args['agents_state_dim'] = status_grid_space['obs']['agents_state'].shape[0]
+            emergency_encoder_arch_args['num_heads'] = model_arch_args['num_heads']
+            emergency_encoder_arch_args['attention_dim'] = model_arch_args['attention_dim'] * model_arch_args[
+                'num_heads']
             self.emergency_encoder = CrowdSimAttention(emergency_encoder_arch_args)
         else:
             raise ValueError(f"Emergency encoder architecture {self.emergency_encoder_arch} not supported.")
@@ -73,28 +76,28 @@ class CrowdSimAttention(nn.Module):
             model_config,
     ):
         nn.Module.__init__(self)
-        self.embedding_dim = model_config['embedding_dim']
+        self.attention_dim = model_config['attention_dim']
         self.emergency_queue_length = model_config['emergency_queue_length']
         self.agents_state_dim = model_config['agents_state_dim']
         self.emergency_feature = 2
         self.num_heads = model_config['num_heads']
         self.keys_fc = SlimFC(
             in_size=self.emergency_feature,
-            out_size=self.embedding_dim,
+            out_size=self.attention_dim,
             initializer=normc_initializer(0.01),
             activation_fn=None)
         self.values_fc = SlimFC(
             in_size=self.emergency_feature,
-            out_size=self.embedding_dim,
+            out_size=self.attention_dim,
             initializer=normc_initializer(0.01),
             activation_fn=None)
         self.query_fc = SlimFC(
             in_size=self.agents_state_dim,
-            out_size=self.embedding_dim,
+            out_size=self.attention_dim,
             initializer=normc_initializer(0.01),
             activation_fn=None)
-        self.attention = nn.MultiheadAttention(self.embedding_dim, self.num_heads, batch_first=True)
-        self.output_dim = self.embedding_dim
+        self.attention = nn.MultiheadAttention(self.attention_dim, self.num_heads, batch_first=True)
+        self.output_dim = self.attention_dim
 
     def forward(self, input_dict: Dict[str, TensorType]) -> (TensorType, List[TensorType]):
         agents_state, emergency = tuple(input_dict.values())
