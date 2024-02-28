@@ -226,7 +226,7 @@ class Predictor(nn.Module):
                 in_size=hidden_size,
                 out_size=output_dim,
                 initializer=normc_initializer(0.01),
-                activation_fn=None),
+                activation_fn=nn.Sigmoid),
             # activation_fn=None),
         )
 
