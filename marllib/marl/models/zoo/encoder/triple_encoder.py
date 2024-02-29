@@ -96,15 +96,21 @@ class CrowdSimAttention(nn.Module):
             out_size=self.attention_dim,
             initializer=normc_initializer(0.01),
             activation_fn=None)
-        self.attention = nn.MultiheadAttention(self.attention_dim, self.num_heads, batch_first=True)
-        self.output_dim = self.attention_dim
+        self.attention = nn.MultiheadAttention(self.agents_state_dim * self.num_heads,
+                                               kdim=self.emergency_feature * self.num_heads,
+                                               vdim=self.emergency_feature * self.num_heads,
+                                               num_heads=self.num_heads, batch_first=True)
+
+        self.output_dim = self.agents_state_dim
 
     def forward(self, input_dict: Dict[str, TensorType]) -> (TensorType, List[TensorType]):
         agents_state, emergency = tuple(input_dict.values())
-        agents_embedding = self.query_fc(agents_state.unsqueeze(1))
-        emergency = emergency.reshape(agents_state.shape[0], -1, 2)
-        key_embedding = self.keys_fc(emergency)
+        # agents_embedding = self.query_fc(agents_state.unsqueeze(1))
+        agents_state = agents_state.unsqueeze(1).repeat(1, 1, self.num_heads)
+        emergency = emergency.reshape(agents_state.shape[0], -1, 2).repeat(1, 1, self.num_heads)
+        # attention_mask = (emergency.sum(dim=-1) == 0).repeat(self.num_heads, 1).unsqueeze(1)
+        # key_embedding = self.keys_fc(emergency)
         # change embedding dim.
-        value_embedding = self.values_fc(emergency)
-        attn_outputs, attn_output_weights = self.attention(agents_embedding, key_embedding, value_embedding)
+        # value_embedding = self.values_fc(emergency)
+        attn_outputs, attn_output_weights = self.attention(agents_state, emergency, emergency)
         return attn_outputs.squeeze(1), attn_output_weights.squeeze(1)
