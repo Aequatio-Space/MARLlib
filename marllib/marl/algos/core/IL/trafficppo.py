@@ -199,7 +199,7 @@ def label_done_masks_and_calculate_gae_for_sample_batch(
         episode: Optional[MultiAgentEpisode] = None) -> SampleBatch:
     status_dim = policy.model.status_dim
     emergency_dim = policy.model.emergency_feature_dim
-    if 'NN' in policy.model.selector_type:
+    if policy.model.intrinsic_mode == 'NN':
         # check whether numbers between status_dim:status_dim + emergency_dim are all zeros, one row per value
         emergency_obs = sample_batch[SampleBatch.OBS][..., status_dim:status_dim + emergency_dim]
         no_emergency_mask = np.nansum(np.abs(emergency_obs), axis=1) == 0
