@@ -766,6 +766,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             all_obs = flat_inputs[Constants.VECTOR_STATE]
             not_dummy_batch = torch.sum(all_obs) > 0
             numpy_observations = all_obs.cpu().numpy()
+            timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0].to(torch.int32).item()
+            logging.debug("NN logged timestep: {}".format(timestep))
             if not_dummy_batch:
                 env_agents_pos = numpy_observations[:, self.n_agents + 2: self.n_agents + 4].reshape(-1,
                                                                                                      self.n_agents,
@@ -776,8 +778,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             emergency_xy = np.stack((emergency_status[0][:, 0],
                                      emergency_status[0][:, 1]), axis=-1)
             target_coverage = emergency_status[..., 3]
-            timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0].to(torch.int32).item()
-            logging.debug("NN logged timestep: {}".format(timestep))
+
             if timestep == 0:
                 for item in ['emergency_mode', 'emergency_target']:
                     setattr(self, 'last_' + item, getattr(self, item))
