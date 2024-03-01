@@ -25,10 +25,6 @@ model_arch_args:
     custom_model_config:
       model_arch_args:
         core_arch: mlp
-        fc_layer: 3
-        out_dim_fc_0: 64
-        out_dim_fc_1: 64
-        out_dim_fc_2: 64
         conv_layer: 1
         out_channel_layer_0: 8
         kernel_size_layer_0: 3

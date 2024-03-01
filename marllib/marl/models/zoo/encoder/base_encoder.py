@@ -26,11 +26,11 @@ import math
 from ray.rllib.models.torch.misc import SlimFC, SlimConv2d, normc_initializer
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.typing import TensorType, List
-
 from warp_drive.utils.constants import Constants
+from .attention_encoder import CrowdSimAttention
 import logging
-torch, nn = try_import_torch()
 
+torch, nn = try_import_torch()
 
 class MixInputEncoderMixin:
     """
@@ -79,21 +79,26 @@ class BaseEncoder(nn.Module, MixInputEncoderMixin):
         self.cnn_activation = model_config.get("conv_activation")
         self.mix_input = False
         self.inputs = None
+        self.use_fc = "fc_layer" in self.custom_config["model_arch_args"]
+        self.use_cnn = "conv_layer" in self.custom_config["model_arch_args"]
+        self.use_attention = "attention_layer" in self.custom_config['model_arch_args']
         # encoder
-        if ("fc_layer" in self.custom_config["model_arch_args"] and
-                "conv_layer" in self.custom_config["model_arch_args"]):
+        if (self.use_fc and self.use_cnn) or (self.use_attention and self.use_cnn):
             self.mix_input = True
             self.encoder = nn.ModuleDict()
-            fc_layers, dim1 = self.construct_fc_layer(obs_space['obs'][Constants.VECTOR_STATE])
-            self.encoder['fc'] = nn.Sequential(*fc_layers)
+            if self.use_fc:
+                fc_layers, dim1 = self.construct_fc_layer(obs_space['obs'][Constants.VECTOR_STATE])
+                self.encoder['fc'] = nn.Sequential(*fc_layers)
+            if self.use_attention:
+                self.encoder['attention'] = CrowdSimAttention(self.custom_config['model_arch_args'])
             cnn_layers, dim2 = self.construct_cnn_layers(obs_space['obs'][Constants.IMAGE_STATE])
             self.encoder['cnn'] = nn.Sequential(*cnn_layers)
             self.output_dim = dim1 + dim2
             self.dims = [dim1, dim2]
         else:
-            if "fc_layer" in self.custom_config["model_arch_args"]:
+            if self.use_fc:
                 layers, input_dim = self.construct_fc_layer(obs_space['obs'])
-            elif "conv_layer" in self.custom_config["model_arch_args"]:
+            elif self.use_cnn:
                 layers, input_dim = self.construct_cnn_layers(obs_space['obs'])
             else:
                 raise ValueError("fc_layer/conv layer not in model arch args")
@@ -150,8 +155,12 @@ class BaseEncoder(nn.Module, MixInputEncoderMixin):
         if self.mix_input:
             state, grid = tuple(inputs.values())
             # logging.debug(f"encoder input shape:{state.shape},{grid.shape}")
-            output = torch.cat([self.encoder['fc'](state),
+            if self.use_fc:
+                output = torch.cat([self.encoder['fc'](state),
                                 self.cnn_forward(self.encoder['cnn'], grid)], dim=-1)
+            elif self.use_attention:
+                output = torch.cat([self.encoder['attention'](state),
+                                    self.cnn_forward(self.encoder['cnn'], grid)], dim=-1)
 
         else:
             # Compute the unmasked logits.

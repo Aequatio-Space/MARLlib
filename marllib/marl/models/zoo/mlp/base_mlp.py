@@ -546,6 +546,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.p_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
                 self.device)
         else:
+            self.use_attention = self.model_arch_args['use_attention']
+            if self.use_attention:
+                pass
             self.p_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
             self.vf_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
 
