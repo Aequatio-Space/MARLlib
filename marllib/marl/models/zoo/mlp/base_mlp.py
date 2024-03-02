@@ -449,6 +449,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         BaseMLPMixin.__init__(self)
 
         # decide the model arch
+        self.last_weight_matrix = None
         self.custom_config = model_config["custom_model_config"]
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
@@ -541,6 +542,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.last_emergency_queue_length = self.last_emergency_mode = self.last_emergency_targets = None
         # encoder
         if self.separate_encoder:
+            assert self.buffer_in_obs, "buffer must in observation for separate encoder"
             self.vf_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
                 self.device)
             self.p_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
@@ -783,6 +785,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 for item in ['emergency_mode', 'emergency_target']:
                     setattr(self, 'last_' + item, getattr(self, item))
                 self.last_emergency_queue_length = [len(q) for q in self.emergency_buffer[:self.n_agents]]
+                if self.separate_encoder and self.p_encoder.last_weight_matrix is not None:
+                    self.last_weight_matrix = self.p_encoder.last_weight_matrix[0]
                 # reset network mode
                 self.reset_states()
             else:
