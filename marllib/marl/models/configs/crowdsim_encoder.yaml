@@ -39,5 +39,5 @@ model_arch_args:
     custom_model_config:
       model_arch_args:
         core_arch: attention
+        attention_dim: 64
         num_heads: 2
-        embedding_dim: 128
