@@ -130,7 +130,9 @@ def relabel_for_sample_batch(
         num_envs = policy.model.num_envs
         if use_intrinsic:
             if policy.model.buffer_in_obs:
-                emergency_position = observation[..., status_dim:status_dim + emergency_feature_dim]
+                emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
+                    emergency_states.shape[0], -1, emergency_feature_dim
+                )
             else:
                 emergency_position = observation[..., status_dim:status_dim + emergency_dim]
             if use_distance_intrinsic:
@@ -405,31 +407,50 @@ def calculate_intrinsic(agents_position: np.ndarray,
     calculate the intrinsic reward for each agent, which is the product of distance and aoi.
     """
     # mask out penalty where emergency_positions are (0,0), which indicates the agent is not in the emergency.
-    distances = np.linalg.norm(agents_position - emergency_position, axis=1)
+    if len(emergency_position.shape) == 2:
+        distances = np.linalg.norm(agents_position - emergency_position, axis=1)
+        intrinsic = calculate_single_intrinsic(agents_position, alpha, anti_goal_distances, distances,
+                                               emergency_position,
+                                               emergency_states, emergency_threshold, fake, mode)
+    elif len(emergency_position.shape) == 3:
+        emergency_num = emergency_position.shape[1]
+        intrinsic = np.zeros((len(agents_position), emergency_num))
+        for i in range(emergency_num):
+            distances = np.linalg.norm(agents_position - emergency_position[:, i], axis=1)
+            intrinsic[:, i] = calculate_single_intrinsic(agents_position, alpha, anti_goal_distances, distances,
+                                                         emergency_position[:, i],
+                                                         emergency_states, emergency_threshold, fake, mode)
+        intrinsic = np.true_divide(np.sum(intrinsic, axis=1), np.sum(intrinsic != 0, axis=1))
+        np.nan_to_num(intrinsic, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+
+    return intrinsic
+
+
+def calculate_single_intrinsic(agents_position, alpha, anti_goal_distances, distances, emergency_position,
+                               emergency_states, emergency_threshold, fake, mode):
     mask = emergency_position.sum(axis=-1) != 0
     # find [aoi, (x,y)] array in state
     if not fake:
         if mode == 'none':
-            return np.zeros(len(agents_position))
+            intrinsic = np.zeros(len(agents_position))
         else:
             if mode == 'dis':
-                return -distances * mask
+                intrinsic = -distances * mask
             else:
                 age_of_informations, all_emergencies_position = emergency_states[..., 2], np.stack(
                     [emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
                 indices = match_aoi(all_emergencies_position, emergency_position, mask)
                 fetched_aois = age_of_informations[np.arange(len(age_of_informations)), indices]
                 if mode == 'aoi':
-                    return -fetched_aois * mask
+                    intrinsic = -fetched_aois * mask
                 elif mode == 'dis_aoi':
-                    return -distances * fetched_aois * mask
+                    intrinsic = -distances * fetched_aois * mask
                 elif mode == 'scaled_dis_aoi':
                     intrinsic = -distances * mask * fetched_aois / emergency_threshold
                     if anti_goal_distances is not None:
                         intrinsic = intrinsic * (1 - alpha) + anti_goal_distances * alpha
-                    return intrinsic
                 else:
-                    raise ValueError("mode should be one of ['none', 'dis', 'aoi', 'dis_aoi', 'scaled_dis_aoi']")
+                    intrinsic = np.zeros(len(agents_position))
         # mask &= fetched_aois > emergency_threshold
     else:
         age_of_informations = np.arange(len(agents_position))
@@ -858,9 +879,9 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
                 original_dict['aim_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_aim_loss")))
                 original_dict['aim_reward_max'] = model.reward_max
                 original_dict['aim_reward_min'] = model.reward_min
-            if hasattr(model, "last_weight_matrix") and model.last_weight_matrix is not None:
-                for i in range(model.emergency_queue_length):
-                    original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
+            # if hasattr(model, "last_weight_matrix") and model.last_weight_matrix is not None:
+            #     for i in range(model.emergency_queue_length):
+            #         original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
             break
     return original_dict
 
