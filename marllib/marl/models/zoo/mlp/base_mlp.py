@@ -502,7 +502,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self._is_train = False
         self.assignment_sample_batches = []
         self.inputs = None
-        self.evaluate_count_down = self.eval_interval = 5
+        self.eval_interval = 1 if self.local_mode else 5
+        self.evaluate_count_down = self.eval_interval
         self.trajectory_generated = 0
         self.episode_length = 120
         self.switch_step = -1

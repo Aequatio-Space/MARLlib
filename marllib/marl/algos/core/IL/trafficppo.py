@@ -882,9 +882,9 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
                 original_dict['aim_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_aim_loss")))
                 original_dict['aim_reward_max'] = model.reward_max
                 original_dict['aim_reward_min'] = model.reward_min
-            # if hasattr(model, "last_weight_matrix") and model.last_weight_matrix is not None:
-            #     for i in range(model.emergency_queue_length):
-            #         original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
+            if hasattr(model, "last_weight_matrix") and model.last_weight_matrix is not None:
+                for i in range(model.emergency_queue_length):
+                    original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
             break
     return original_dict
 

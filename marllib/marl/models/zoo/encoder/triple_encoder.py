@@ -25,7 +25,8 @@ class TripleHeadEncoder(nn.Module):
         # Two encoders, one for image and vector input, one for vector input.
         self.emergency_feature_dim = 2
         status_grid_space = dict(obs=spaces.Dict({
-            'agents_state': spaces.Box(low=0, high=2, shape=(self.custom_config['status_dim'],), dtype=np.float32),
+            'agents_state': spaces.Box(low=0, high=2, shape=(self.custom_config['status_dim'] +
+                                                             self.custom_config['emergency_dim'],), dtype=np.float32),
             'grid': spaces.Box(low=0, high=1, shape=eval(self.custom_config['grid_dim']), dtype=np.float32)
         }))
         emergency_obs_space = dict(obs=spaces.Box(low=0, high=2, shape=(self.emergency_dim,), dtype=np.float32))
@@ -37,7 +38,8 @@ class TripleHeadEncoder(nn.Module):
             self.emergency_encoder = BaseEncoder(emergency_encoder_arch_args, emergency_obs_space)
         elif self.emergency_encoder_arch == 'attention':
             emergency_encoder_arch_args['emergency_queue_length'] = model_arch_args['emergency_queue_length']
-            emergency_encoder_arch_args['agents_state_dim'] = status_grid_space['obs']['agents_state'].shape[0]
+            emergency_encoder_arch_args['agents_state_dim'] = (status_grid_space['obs']['agents_state'].shape[0] -
+                                                               self.custom_config['emergency_dim'])
             emergency_encoder_arch_args['num_heads'] = model_arch_args['num_heads']
             emergency_encoder_arch_args['attention_dim'] = model_arch_args['attention_dim'] * model_arch_args[
                 'num_heads']
@@ -47,7 +49,7 @@ class TripleHeadEncoder(nn.Module):
         self.output_dim = self.emergency_encoder.output_dim + self.status_grid_encoder.output_dim
 
     def forward(self, inputs):
-        status = inputs[Constants.VECTOR_STATE][..., :-self.emergency_dim]
+        status = inputs[Constants.VECTOR_STATE]
         emergency = inputs[Constants.VECTOR_STATE][..., -self.emergency_dim:]
         output = self.status_grid_encoder({Constants.VECTOR_STATE: status,
                                            Constants.IMAGE_STATE: inputs[Constants.IMAGE_STATE]})
@@ -55,9 +57,9 @@ class TripleHeadEncoder(nn.Module):
             emergency_embedding = self.emergency_encoder(emergency)
         else:
             emergency_embedding, weights_matrix = self.emergency_encoder(
-                {Constants.VECTOR_STATE: status, 'emergency': emergency})
+                {Constants.VECTOR_STATE: status[..., :-self.emergency_dim], 'emergency': emergency})
             self.last_weight_matrix = weights_matrix
-        status_embedding, grid_embedding = output[..., :self.status_grid_encoder.dims[0]], \
-            output[..., self.status_grid_encoder.dims[0]:]
+        # status_embedding, grid_embedding = output[..., :self.status_grid_encoder.dims[0]], \
+        #     output[..., self.status_grid_encoder.dims[0]:]
         # x = self.merge_branch(torch.cat((status_embedding, emergency, grid_embedding), dim=-1))
-        return torch.cat((status_embedding, emergency_embedding, grid_embedding), dim=-1)
+        return torch.cat((output, emergency_embedding), dim=-1)
