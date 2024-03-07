@@ -491,7 +491,8 @@ def add_auxiliary_loss(
         train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
     logging.debug("add_auxiliary_loss is called")
     status_dim = policy.model.status_dim
-    device = model.device
+    my_device = model.device
+    device = my_device
     num_agents = policy.model.n_agents
     this_emergency_count = policy.model.emergency_count
     emergency_dim = policy.model.emergency_dim
@@ -514,7 +515,7 @@ def add_auxiliary_loss(
         if torch.sum(mask) == 0:
             mean_loss = torch.tensor(0.0)
         else:
-            mean_loss = torch.tensor(0.0).to(model.device)
+            mean_loss = torch.tensor(0.0).to(my_device)
             if torch.sum(inputs[mask]) != 0:
                 batch_size = 32
                 learning_rate = 0.001 if model.render is False else 0
@@ -522,25 +523,12 @@ def add_auxiliary_loss(
                 criterion = nn.MSELoss()
                 optimizer = optim.Adam(selector.parameters(), lr=learning_rate)
                 dataset = torch.utils.data.TensorDataset(inputs[mask].to(torch.float32), labels[mask].to(torch.float32))
-                dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-                progress = tqdm(range(epochs))
-                selector.train()
-                for _ in progress:
-                    for batch_observations, batch_distances in dataloader:
-                        optimizer.zero_grad()
-                        outputs = selector(batch_observations.to(model.device))
-                        if len(outputs.shape) > 1:
-                            outputs = outputs.squeeze()
-                        loss = criterion(outputs, batch_distances.to(model.device))
-                        loss.backward()
-                        mean_loss += loss.detach()
-                        optimizer.step()
-                    progress.set_postfix({'mean_loss': mean_loss.item()})
-                mean_loss /= epochs * len(dataloader)
-                selector.eval()
+                mean_loss = train_predictor(batch_size, criterion, dataset, epochs, mean_loss,
+                                            my_device, optimizer, selector)
     else:
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
+
     if hasattr(model, "use_aim") and model.use_aim and model.with_task_allocation:
         discriminator: nn.Module = model.discriminator
         optimizer = model.optimizer
@@ -573,8 +561,20 @@ def add_auxiliary_loss(
         else:
             wgan_loss = torch.tensor(0.0)
         model.tower_stats['mean_aim_loss'] = wgan_loss
-    else:
-        pass
+    if hasattr(model, "NN_buffer") and hasattr(model, "prioritized_buffer") and \
+            model.NN_buffer and model.prioritized_buffer and len(model.generator_inputs) > 0:
+        generator = model.weight_generator
+        batch_size = 32
+        epochs = 1
+        criterion = nn.MSELoss()
+        inputs = torch.stack(model.generator_inputs)
+        labels = torch.stack(model.generator_labels)
+        dataset = torch.utils.data.TensorDataset(inputs.to(torch.float32), labels.to(torch.float32))
+        mean_loss = train_predictor(batch_size, criterion, dataset, epochs, mean_loss,
+                                    my_device, model.weight_optimizer, generator)
+        model.generator_inputs = []
+        model.generator_labels = []
+    model.tower_stats['mean_weight_loss'] = mean_loss
     lower_agent_batches = train_batch.split_by_episode()
     logging.debug("Switch Step Status: %s", model.step_count > model.switch_step)
     if hasattr(model, "selector_type") and 'RL' in model.selector_type and model.with_task_allocation:
@@ -652,6 +652,29 @@ def add_auxiliary_loss(
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
     model.eval()
     return total_loss
+
+
+def train_predictor(batch_size, criterion, dataset, epochs, mean_loss, my_device, optimizer, selector):
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    progress = tqdm(range(epochs))
+    selector.train()
+    length = len(dataloader)
+    for _ in progress:
+        batch_loss = 0
+        for batch_observations, batch_distances in dataloader:
+            optimizer.zero_grad()
+            outputs = selector(batch_observations.to(my_device))
+            if len(outputs.shape) > 1:
+                outputs = outputs.squeeze(-1)
+            loss = criterion(outputs, batch_distances.to(my_device))
+            loss.backward()
+            batch_loss += loss.detach()
+            optimizer.step()
+        progress.set_postfix({'mean_loss': batch_loss.item() / length})
+        mean_loss += batch_loss
+    mean_loss /= epochs * length
+    selector.eval()
+    return mean_loss
 
 
 def get_emergency_state(emergency_dim, lower_agent_batch, num_agents, status_dim, this_emergency_count):
@@ -866,7 +889,7 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
     original_dict = kl_and_loss_stats(policy, train_batch)
     #  'label_count', 'valid_fragment_length', 'relabel_percentage'
     if policy.model.with_task_allocation:
-        for item in ['regress_loss', 'intrinsic_rewards']:
+        for item in ['regress_loss', 'intrinsic_rewards', 'weight_loss']:
             original_dict[item] = torch.mean(torch.stack(policy.get_tower_stats("mean_" + item)))
         for model in policy.model_gpu_towers:
             if 'RL' in model.selector_type:

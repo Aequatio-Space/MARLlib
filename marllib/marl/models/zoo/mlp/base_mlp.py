@@ -207,34 +207,6 @@ def argmax_to_mask(argmax_indices, num_classes=4, num_coords=2):
     return mask
 
 
-class RankNet(nn.Module):
-    def __init__(self, p, sigma=1):
-        super(RankNet, self).__init__(p, sigma)
-        self._net = nn.Sequential(
-            # layer-1
-            nn.Linear(in_features=p, out_features=256),
-            nn.Dropout(0.5),
-            nn.ReLU(),
-            # layer-2
-            nn.Linear(in_features=256, out_features=128),
-            nn.Dropout(0.5),
-            nn.ReLU(),
-            # layer-out
-            nn.Linear(in_features=128, out_features=1)
-        )
-        self._out = nn.Sigmoid()
-
-    def f(self, xi, xj):
-        si = self._net(xi)
-        sj = self._net(xj)
-        diff = self.sigma * (si - sj)
-        Pij_hat = self._out(diff)
-        return Pij_hat
-
-    def predict(self, x):
-        s = self._net(x)
-        return s
-
 class Predictor(nn.Module):
     def __init__(self, input_dim=22, hidden_size=64, output_dim=1):
         super(Predictor, self).__init__()
@@ -254,7 +226,7 @@ class Predictor(nn.Module):
                 in_size=hidden_size,
                 out_size=output_dim,
                 initializer=normc_initializer(0.01),
-                activation_fn=nn.Sigmoid),
+                activation_fn=None),
             # activation_fn=None),
         )
 
@@ -561,9 +533,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         else:
             self.emergency_buffer = [deque() for _ in range(total_slots)]
         if self.NN_buffer:
-            self.rank_net = RankNet(self.emergency_dim)
+            self.weight_generator = Predictor(self.emergency_feature_dim * 2 + 1).to(self.device)
+            self.weight_optimizer = torch.optim.Adam(self.weight_generator.parameters(), lr=0.001)
+            self.generator_labels = []
+            self.generator_inputs = []
         else:
-            self.rank_net = None
+            self.weight_generator = self.generator_labels = self.generator_inputs = None
         # self.anti_goal_reward = np.zeros((self.episode_length, self.num_envs, self.n_agents), dtype=np.float32)
         self.assign_status = np.full((self.num_envs, self.emergency_count), dtype=np.int32, fill_value=-1)
         self.with_programming_optimization = self.model_arch_args['with_programming_optimization']
@@ -834,7 +809,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         else:
                             state_info = None
                         self.rl_assignment(all_obs, emergency_xy, env_agents_pos, target_coverage,
-                                           self.emergency_buffer, self.n_agents, state_info=state_info)
+                                           self.emergency_buffer, self.n_agents, state_info=state_info,
+                                           timestep=timestep, emergency_status=emergency_status)
                         # old_reference = self.oracle_assignment(all_obs.clone().detach(), emergency_xy, target_coverage,
                         #                        self.mock_emergency_mode, self.mock_emergency_target,
                         #                        self.mock_emergency_indices)
@@ -1063,14 +1039,17 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                               "No allocation is made")
 
     def rl_assignment(self, all_obs, emergency_xy, env_agents_pos, target_coverage, my_emergency_buffer, n_agents,
-                      state_info=None):
+                      state_info=None, timestep=None, emergency_status=None):
         all_env_obs = all_obs.clone().detach().reshape(-1, n_agents, self.status_dim + self.emergency_dim)
         env_target_coverage = target_coverage[::n_agents]
-        self.clear_buffer(env_target_coverage, my_emergency_buffer, emergency_xy, env_agents_pos, n_agents)
-        self.do_rl_assignment(all_env_obs, emergency_xy, env_target_coverage, my_emergency_buffer, n_agents, state_info)
+        self.clear_buffer(env_target_coverage, my_emergency_buffer, emergency_xy,
+                          env_agents_pos, n_agents, emergency_status)
+        self.do_rl_assignment(all_env_obs, emergency_xy, env_target_coverage, my_emergency_buffer,
+                              n_agents, state_info, timestep)
         self.output_rl_assignment(all_obs, emergency_xy, my_emergency_buffer)
 
-    def clear_buffer(self, env_target_coverage, my_emergency_buffer, emergency_xy, env_agents_pos, n_agents):
+    def clear_buffer(self, env_target_coverage, my_emergency_buffer, emergency_xy,
+                     env_agents_pos, n_agents, emergency_status=None):
         env_covered_emergency = env_target_coverage == 1
         for i in range(self.num_envs):
             offset = i * n_agents
@@ -1082,7 +1061,18 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     new_buffer = PriorityQueue()
                     for item in my_buffer.tolist():
                         if item not in covered_emergency:
-                            new_priority = np.linalg.norm(env_agents_pos[i][j] - emergency_xy[item])
+                            distance = np.linalg.norm(env_agents_pos[i][j] - emergency_xy[item])
+                            aoi = emergency_status[i][item][2]
+                            if self.NN_buffer:
+                                current_emergency_status = np.concatenate(
+                                    [env_agents_pos[i][j], emergency_status[i][item][:3]])
+                                input = torch.from_numpy(current_emergency_status).unsqueeze(0).to(self.device)
+                                new_priority = self.weight_generator(input).item()
+                                self.generator_labels.append(
+                                    torch.tensor(distance * (1 - aoi / self.emergency_threshold)))
+                                self.generator_inputs.append(input.squeeze(0))
+                            else:
+                                new_priority = distance
                             new_buffer.push(new_priority, item)
                     my_emergency_buffer[actual_agent_id] = new_buffer
                 else:
@@ -1095,7 +1085,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         my_buffer.popleft()
 
     def do_rl_assignment(self, all_env_obs, emergency_xy, env_target_coverage,
-                         my_emergency_buffer, n_agents, state_info=None):
+                         my_emergency_buffer, n_agents, state_info=None, timestep=None):
         """
         Make emergency assignment for each agent in each environment.
         """
@@ -1186,9 +1176,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     if len(current_buffer) < self.emergency_queue_length:
                         if self.prioritized_buffer:
                             # calculate the distance between selected agent and emergency
+                            if self.NN_buffer:
+                                pass
                             distance = np.linalg.norm(agents_pos[action].cpu().numpy() - emergency)
                             current_buffer.push(distance, actual_emergency_indices[k])
-
                         else:
                             current_buffer.append(actual_emergency_indices[k])
                         agents_buffer_lens[action] += 1
