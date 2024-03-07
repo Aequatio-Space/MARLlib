@@ -207,6 +207,34 @@ def argmax_to_mask(argmax_indices, num_classes=4, num_coords=2):
     return mask
 
 
+class RankNet(nn.Module):
+    def __init__(self, p, sigma=1):
+        super(RankNet, self).__init__(p, sigma)
+        self._net = nn.Sequential(
+            # layer-1
+            nn.Linear(in_features=p, out_features=256),
+            nn.Dropout(0.5),
+            nn.ReLU(),
+            # layer-2
+            nn.Linear(in_features=256, out_features=128),
+            nn.Dropout(0.5),
+            nn.ReLU(),
+            # layer-out
+            nn.Linear(in_features=128, out_features=1)
+        )
+        self._out = nn.Sigmoid()
+
+    def f(self, xi, xj):
+        si = self._net(xi)
+        sj = self._net(xj)
+        diff = self.sigma * (si - sj)
+        Pij_hat = self._out(diff)
+        return Pij_hat
+
+    def predict(self, x):
+        s = self._net(x)
+        return s
+
 class Predictor(nn.Module):
     def __init__(self, input_dim=22, hidden_size=64, output_dim=1):
         super(Predictor, self).__init__()
@@ -482,6 +510,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.intrinsic_mode = self.model_arch_args['intrinsic_mode']
         self.buffer_in_obs = self.model_arch_args['buffer_in_obs']
         self.prioritized_buffer = self.model_arch_args['prioritized_buffer']
+        self.NN_buffer = self.model_arch_args['NN_buffer']
         if self.buffer_in_obs:
             self.emergency_dim = self.emergency_queue_length * self.emergency_feature_dim
         else:
@@ -531,6 +560,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.emergency_buffer = [PriorityQueue() for _ in range(total_slots)]
         else:
             self.emergency_buffer = [deque() for _ in range(total_slots)]
+        if self.NN_buffer:
+            self.rank_net = RankNet(self.emergency_dim)
+        else:
+            self.rank_net = None
         # self.anti_goal_reward = np.zeros((self.episode_length, self.num_envs, self.n_agents), dtype=np.float32)
         self.assign_status = np.full((self.num_envs, self.emergency_count), dtype=np.int32, fill_value=-1)
         self.with_programming_optimization = self.model_arch_args['with_programming_optimization']
@@ -549,9 +582,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.p_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
                 self.device)
         else:
-            self.use_attention = self.model_arch_args['use_attention']
-            if self.use_attention:
-                pass
             self.p_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
             self.vf_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
 
