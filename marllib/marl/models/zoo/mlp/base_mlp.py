@@ -1064,13 +1064,14 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                             distance = np.linalg.norm(env_agents_pos[i][j] - emergency_xy[item])
                             aoi = emergency_status[i][item][2]
                             if self.NN_buffer:
-                                current_emergency_status = np.concatenate(
-                                    [env_agents_pos[i][j], emergency_status[i][item][:3]])
-                                input = torch.from_numpy(current_emergency_status).unsqueeze(0).to(self.device)
-                                new_priority = self.weight_generator(input).item()
-                                self.generator_labels.append(
-                                    torch.tensor(distance * (1 - aoi / self.emergency_threshold)))
-                                self.generator_inputs.append(input.squeeze(0))
+                                new_priority = distance * (1 - aoi / self.emergency_threshold)
+                                # current_emergency_status = np.concatenate(
+                                #     [env_agents_pos[i][j], emergency_status[i][item][:3]])
+                                # input = torch.from_numpy(current_emergency_status).unsqueeze(0).to(self.device)
+                                # new_priority = self.weight_generator(input).item()
+                                # self.generator_labels.append(
+                                #     torch.tensor(distance * (1 - aoi / self.emergency_threshold)))
+                                # self.generator_inputs.append(input.squeeze(0))
                             else:
                                 new_priority = distance
                             new_buffer.push(new_priority, item)

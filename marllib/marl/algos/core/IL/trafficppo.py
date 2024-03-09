@@ -523,8 +523,7 @@ def add_auxiliary_loss(
                 criterion = nn.MSELoss()
                 optimizer = optim.Adam(selector.parameters(), lr=learning_rate)
                 dataset = torch.utils.data.TensorDataset(inputs[mask].to(torch.float32), labels[mask].to(torch.float32))
-                mean_loss = train_predictor(batch_size, criterion, dataset, epochs, mean_loss,
-                                            my_device, optimizer, selector)
+                mean_loss = train_predictor(batch_size, criterion, dataset, epochs, my_device, optimizer, selector)
     else:
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
@@ -570,8 +569,8 @@ def add_auxiliary_loss(
         inputs = torch.stack(model.generator_inputs)
         labels = torch.stack(model.generator_labels)
         dataset = torch.utils.data.TensorDataset(inputs.to(torch.float32), labels.to(torch.float32))
-        mean_loss = train_predictor(batch_size, criterion, dataset, epochs, mean_loss,
-                                    my_device, model.weight_optimizer, generator)
+        mean_loss = train_predictor(batch_size, criterion, dataset, epochs, my_device, model.weight_optimizer,
+                                    generator)
         model.generator_inputs = []
         model.generator_labels = []
     model.tower_stats['mean_weight_loss'] = mean_loss
@@ -654,13 +653,14 @@ def add_auxiliary_loss(
     return total_loss
 
 
-def train_predictor(batch_size, criterion, dataset, epochs, mean_loss, my_device, optimizer, selector):
+def train_predictor(batch_size, criterion, dataset, epochs, my_device, optimizer, selector):
+    mean_loss = torch.tensor(0.0).to(my_device)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
     progress = tqdm(range(epochs))
     selector.train()
     length = len(dataloader)
     for _ in progress:
-        batch_loss = 0
+        batch_loss = torch.tensor(0.0).to(my_device)
         for batch_observations, batch_distances in dataloader:
             optimizer.zero_grad()
             outputs = selector(batch_observations.to(my_device))
