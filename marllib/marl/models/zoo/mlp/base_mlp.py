@@ -116,8 +116,7 @@ def split_first_level(d, convert_tensor=True):
     return result
 
 
-def others_target_as_anti_goal(env_agents_pos: np.ndarray,
-                               emergency_xy: np.ndarray):
+def others_target_as_anti_goal(env_agents_pos: np.ndarray):
     # generate distance matrix for all agents in each environment
     num_envs, num_agents = env_agents_pos.shape[0], env_agents_pos.shape[1]
     agents_x = env_agents_pos[..., 0]
@@ -133,9 +132,6 @@ def others_target_as_anti_goal(env_agents_pos: np.ndarray,
     anti_goals_reward = np.linalg.norm(flattened_agent_pos[nearest_agent_ids] - flattened_agent_pos, axis=1)
     clipped_reward = np.clip(anti_goals_reward, a_min=0, a_max=0.3)
     return clipped_reward
-    # anti_goals = emergency_xy[nearest_agent_ids.ravel()].reshape(num_envs, num_agents, 2)
-    # valid_mask = anti_goals[..., 0] & anti_goals[..., 1]
-    # anti_goal_reward = np.linalg.norm(anti_goals - env_agents_pos, axis=2) * valid_mask
 
 
 
@@ -974,15 +970,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 self.step_count += self.episode_length * self.num_envs
             self.last_virtual_obs = input_dict['obs']['obs']['agents_state']
             if self.sibling_rivalry:
-                if self.buffer_in_obs:
-                    raise NotImplementedError("Buffer in obs is not implemented for sibling rivalry")
                 if not_dummy_batch:
                     # valid_mask = (self.assign_status != -1) & (target_coverage[::self.n_agents] == 0)
                     # env_id, emergency_index = np.nonzero(valid_mask)
                     # if len(env_id) > 0:
                     new_anti_goal_reward = others_target_as_anti_goal(
                         env_agents_pos,
-                        all_obs[..., self.status_dim:self.status_dim + self.emergency_dim].cpu().numpy(),
                     )
                     self.last_anti_goal_reward = new_anti_goal_reward
                     # else:
