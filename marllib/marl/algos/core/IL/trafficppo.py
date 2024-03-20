@@ -129,9 +129,10 @@ def relabel_for_sample_batch(
         agents_position = observation[..., num_agents + 2: num_agents + 4]
         num_envs = policy.model.num_envs
         if use_intrinsic:
+            batch_size = emergency_states.shape[0]
             if policy.model.buffer_in_obs:
                 emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
-                    emergency_states.shape[0], -1, emergency_feature_dim
+                    batch_size, -1, emergency_feature_dim
                 )
             else:
                 emergency_position = observation[..., status_dim:status_dim + emergency_dim]
@@ -141,6 +142,11 @@ def relabel_for_sample_batch(
                     anti_goal_distances = sample_batch[ANTI_GOAL_REWARD]
                 else:
                     anti_goal_distances = None
+                # rearrange emergency according to weight matrix
+                if policy.model.buffer_in_obs and policy.model.separate_encoder:
+                    rearranged_indices = sample_batch['weight_matrix'].argsort()
+                    for i in range(batch_size):
+                        emergency_position[i] = emergency_position[i][rearranged_indices[i]]
                 intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
                                                 emergency_threshold=policy.model.emergency_threshold,
                                                 anti_goal_distances=anti_goal_distances,
@@ -753,6 +759,7 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
             emergency_cover_reward = 1 - discount_factor[action]
             assign_rewards[i] = emergency_cover_reward
     else:
+        # abandoned.
         emergency_xy = emergency_states[..., 0:2][-1]
         start_indices, end_indices = get_emergency_start_end_numba(emergency_in_lower_level_obs)
         selected_emergencies = emergency_in_lower_level_obs[np.array(start_indices)]
@@ -780,7 +787,7 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
                     if np.isnan(mean_reward):
                         mean_reward = 0
                 # emergency_cover_reward = mean_reward + (assignment_status[emergency_index] == action)
-                emergency_cover_reward = mean_reward * (1 - discount_factor[action])
+                emergency_cover_reward = mean_reward
                 logging.debug(f"delta: {delta}, mean_reward: {mean_reward}, with_emergency: {emergency_cover_reward}")
 
 
