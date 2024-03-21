@@ -429,10 +429,12 @@ def calculate_intrinsic(agents_position: np.ndarray,
             else:
                 last_pos = emergency_position[:, i - 1]
             distances = np.linalg.norm(last_pos - emergency_position[:, i], axis=1)
-            intrinsic[:, i] = calculate_single_intrinsic(last_pos, alpha, anti_goal_distances, distances,
+            intrinsic[:, i] = calculate_single_intrinsic(last_pos, alpha, None, distances,
                                                          emergency_position[:, i],
                                                          emergency_states, emergency_threshold, fake, mode)
         intrinsic = np.sum(intrinsic, axis=1)
+        if anti_goal_distances is not None:
+            intrinsic = intrinsic * (1 - alpha) + anti_goal_distances * alpha
     return intrinsic
 
 
