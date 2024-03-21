@@ -628,10 +628,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         # Note, the final activation cannot be tanh, check.
         self.emergency_mode_list = np.zeros([self.episode_length, self.n_agents], dtype=np.bool_)
         self.emergency_target_list = np.zeros([self.episode_length, self.n_agents, 2], dtype=np.float32)
-        self.emergency_feature_in_buffer = 3
+        self.emergency_feature_in_render = 3
         self.emergency_buffer_list = np.full([self.episode_length,
                                               self.n_agents,
-                                              self.emergency_queue_length * self.emergency_feature_in_buffer],
+                                              self.emergency_queue_length * self.emergency_feature_in_render],
                                              dtype=np.float32, fill_value=-1.0)
         if self.checkpoint_path and not self.render:
             logging.debug(f"Loading checkpoint from {self.checkpoint_path['model_path']}")
@@ -937,7 +937,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         emergencies_in_buffer = emergency_xy[indices]
                         render_result = np.hstack((emergencies_in_buffer, np.array(indices)[:, np.newaxis]))
                         self.emergency_buffer_list[timestep][i, :buffer_length *
-                                                                 self.emergency_feature_in_buffer] = render_result.ravel()
+                                                                 self.emergency_feature_in_render] = render_result.ravel()
             if timestep == self.episode_length - 1:
                 if self.render or self.evaluate_count_down == 0:
                     # WARNING: not modified for numpy.
@@ -1229,7 +1229,14 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         indices = buffer.tolist()
                     else:
                         indices = list(buffer)
-                    buffer_as_obs[:my_len * 2] = torch.from_numpy(emergency_xy[i // self.n_agents][indices].ravel())
+                    this_emergency_xy = torch.from_numpy(emergency_xy[i // self.n_agents][indices])
+                    if self.emergency_feature_dim > 2:
+                        agent_pos = all_obs[i][self.n_agents + 2: self.n_agents + 4]
+                        distances = torch.norm(agent_pos - this_emergency_xy, dim=1)
+                        buffer_features = torch.cat([this_emergency_xy, distances.unsqueeze(-1)], dim=1).flatten()
+                    else:
+                        buffer_features = this_emergency_xy.flatten()
+                    buffer_as_obs[:my_len * self.emergency_feature_dim] = buffer_features
                     all_obs[i][self.status_dim:self.status_dim + self.emergency_dim] = buffer_as_obs
                 else:
                     all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \

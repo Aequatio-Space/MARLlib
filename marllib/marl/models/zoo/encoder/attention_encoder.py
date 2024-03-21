@@ -60,7 +60,7 @@ class CrowdSimAttention(nn.Module):
         self.attention_dim = model_config['attention_dim']
         self.emergency_queue_length = model_config['emergency_queue_length']
         self.agents_state_dim = model_config['agents_state_dim']
-        self.emergency_feature = 2
+        self.emergency_feature = model_config['emergency_feature']
         self.num_heads = model_config['num_heads']
         self.keys_fc = SlimFC(
             in_size=self.emergency_feature,

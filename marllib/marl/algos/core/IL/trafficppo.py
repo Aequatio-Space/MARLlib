@@ -134,6 +134,8 @@ def relabel_for_sample_batch(
                 emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
                     batch_size, -1, emergency_feature_dim
                 )
+                if emergency_feature_dim > 2:
+                    emergency_position = emergency_position[..., :2]
             else:
                 emergency_position = observation[..., status_dim:status_dim + emergency_dim]
             if use_distance_intrinsic:
@@ -422,16 +424,15 @@ def calculate_intrinsic(agents_position: np.ndarray,
         emergency_num = emergency_position.shape[1]
         intrinsic = np.zeros((len(agents_position), emergency_num))
         for i in range(emergency_num):
-            distances = np.linalg.norm(agents_position - emergency_position[:, i], axis=1)
             if i == 0:
                 last_pos = agents_position
             else:
                 last_pos = emergency_position[:, i - 1]
+            distances = np.linalg.norm(last_pos - emergency_position[:, i], axis=1)
             intrinsic[:, i] = calculate_single_intrinsic(last_pos, alpha, anti_goal_distances, distances,
                                                          emergency_position[:, i],
                                                          emergency_states, emergency_threshold, fake, mode)
         intrinsic = np.sum(intrinsic, axis=1)
-        # np.nan_to_num(intrinsic, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
     return intrinsic
 
 

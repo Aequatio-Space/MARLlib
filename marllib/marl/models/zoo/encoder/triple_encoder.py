@@ -23,7 +23,7 @@ class TripleHeadEncoder(nn.Module):
         self.activation = self.custom_config.get("fcnet_activation")
         self.emergency_dim = self.custom_config['emergency_dim']
         # Two encoders, one for image and vector input, one for vector input.
-        self.emergency_feature_dim = 2
+        self.emergency_feature_dim = 3
         status_grid_space = dict(obs=spaces.Dict({
             'agents_state': spaces.Box(low=0, high=2, shape=(self.custom_config['status_dim'] +
                                                              self.custom_config['emergency_dim'],), dtype=np.float32),
@@ -43,6 +43,7 @@ class TripleHeadEncoder(nn.Module):
             emergency_encoder_arch_args['num_heads'] = model_arch_args['num_heads']
             emergency_encoder_arch_args['attention_dim'] = model_arch_args['attention_dim'] * model_arch_args[
                 'num_heads']
+            emergency_encoder_arch_args['emergency_feature'] = self.emergency_feature_dim
             self.emergency_encoder = CrowdSimAttention(emergency_encoder_arch_args)
         else:
             raise ValueError(f"Emergency encoder architecture {self.emergency_encoder_arch} not supported.")
@@ -59,7 +60,7 @@ class TripleHeadEncoder(nn.Module):
             emergency_embedding, weights_matrix = self.emergency_encoder(
                 {Constants.VECTOR_STATE: status[..., :-self.emergency_dim], 'emergency': emergency})
             self.last_weight_matrix = weights_matrix
-        # status_embedding, grid_embedding = output[..., :self.status_grid_encoder.dims[0]], \
-        #     output[..., self.status_grid_encoder.dims[0]:]
+        status_embedding, grid_embedding = output[..., :self.status_grid_encoder.dims[0]], \
+            output[..., self.status_grid_encoder.dims[0]:]
         # x = self.merge_branch(torch.cat((status_embedding, emergency, grid_embedding), dim=-1))
-        return torch.cat((output, emergency_embedding), dim=-1)
+        return torch.cat((status_embedding, emergency_embedding, grid_embedding), dim=-1)
