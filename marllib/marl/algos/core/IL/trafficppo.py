@@ -134,10 +134,10 @@ def relabel_for_sample_batch(
                 emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
                     batch_size, -1, emergency_feature_dim
                 )
-                if emergency_feature_dim > 2:
-                    emergency_position = emergency_position[..., :2]
             else:
                 emergency_position = observation[..., status_dim:status_dim + emergency_dim]
+            if emergency_feature_dim > 2:
+                emergency_position = emergency_position[..., :2]
             if use_distance_intrinsic:
                 if policy.model.sibling_rivalry:
                     assert ANTI_GOAL_REWARD in sample_batch, ANTI_GOAL_REWARD + " is not in sample_batch."

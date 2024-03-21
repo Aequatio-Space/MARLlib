@@ -1216,22 +1216,23 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             my_len = len(buffer)
             if my_len > 0:
                 if self.prioritized_buffer:
-                    _, buffer_head = buffer[0]
+                    head_distance, buffer_head = buffer[0]
                 else:
                     buffer_head = buffer[0]
+                    head_distance = None
                 new_emergency_xy = emergency_xy[i // self.n_agents][buffer_head]
                 self.emergency_indices[i] = buffer_head
                 self.emergency_target[i] = new_emergency_xy
                 self.emergency_mode[i] = 1
+                agent_pos = all_obs[i][self.n_agents + 2: self.n_agents + 4]
                 if self.buffer_in_obs:
                     buffer_as_obs = torch.zeros(self.emergency_dim, device=self.device)
                     if self.prioritized_buffer:
                         indices = buffer.tolist()
                     else:
                         indices = list(buffer)
-                    this_emergency_xy = torch.from_numpy(emergency_xy[i // self.n_agents][indices])
+                    this_emergency_xy = torch.from_numpy(emergency_xy[i // self.n_agents][indices]).to(self.device)
                     if self.emergency_feature_dim > 2:
-                        agent_pos = all_obs[i][self.n_agents + 2: self.n_agents + 4]
                         distances = torch.norm(agent_pos - this_emergency_xy, dim=1)
                         buffer_features = torch.cat([this_emergency_xy, distances.unsqueeze(-1)], dim=1).flatten()
                     else:
@@ -1239,6 +1240,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     buffer_as_obs[:my_len * self.emergency_feature_dim] = buffer_features
                     all_obs[i][self.status_dim:self.status_dim + self.emergency_dim] = buffer_as_obs
                 else:
+                    if not self.prioritized_buffer:
+                        head_distance = np.linalg.norm(agent_pos - new_emergency_xy)
+                    if self.emergency_feature_dim > 2:
+                        new_emergency_xy = np.concatenate([new_emergency_xy, [head_distance]])
                     all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \
                         torch.from_numpy(new_emergency_xy)
             else:
