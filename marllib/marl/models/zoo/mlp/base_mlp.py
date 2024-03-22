@@ -788,6 +788,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     setattr(self, 'last_' + item, getattr(self, item))
                 self.last_emergency_queue_length = [len(q) for q in self.emergency_buffer[:self.n_agents]]
                 if self.separate_encoder and self.p_encoder.last_weight_matrix is not None:
+                    # for logging purpose
                     self.last_weight_matrix = self.p_encoder.last_weight_matrix.mean(axis=0)
                 # reset network mode
                 self.reset_states()

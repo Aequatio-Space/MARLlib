@@ -131,7 +131,11 @@ def relabel_for_sample_batch(
         if use_intrinsic:
             batch_size = emergency_states.shape[0]
             if policy.model.buffer_in_obs:
-                emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
+                if policy.model.separate_encoder:
+                    emergency_position = sample_batch['executor_obs'][...,
+                                         status_dim:status_dim + emergency_feature_dim]
+                else:
+                    emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
                     batch_size, -1, emergency_feature_dim
                 )
             else:
@@ -145,10 +149,10 @@ def relabel_for_sample_batch(
                 else:
                     anti_goal_distances = None
                 # rearrange emergency according to weight matrix
-                if policy.model.buffer_in_obs and policy.model.separate_encoder:
-                    rearranged_indices = sample_batch['weight_matrix'].argsort()
-                    for i in range(batch_size):
-                        emergency_position[i] = emergency_position[i][rearranged_indices[i]]
+                # if policy.model.buffer_in_obs and policy.model.separate_encoder:
+                #     rearranged_indices = sample_batch['weight_matrix'].argsort()
+                #     for i in range(batch_size):
+                #         emergency_position[i] = emergency_position[i][rearranged_indices[i]]
                 intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
                                                 emergency_threshold=policy.model.emergency_threshold,
                                                 anti_goal_distances=anti_goal_distances,
@@ -658,6 +662,12 @@ def add_auxiliary_loss(
         model.tower_stats['mean_intrinsic_rewards'] = torch.mean(train_batch['intrinsic_rewards'])
     model.train()
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
+    # print the gradient of the model.p_encoder (query, keys, values)
+    for name, param in model.p_encoder.named_parameters():
+        if param.grad is not None:
+            logging.debug(f"Name: {name}, Gradient: {param.grad.mean()}")
+        else:
+            logging.debug(f"Name: {name}, Gradient: None")
     model.eval()
     return total_loss
 
@@ -888,6 +898,8 @@ def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
             extra_dict[ANTI_GOAL_REWARD] = model.last_anti_goal_reward
         if hasattr(model.p_encoder, "last_weight_matrix"):
             extra_dict['weight_matrix'] = model.p_encoder.last_weight_matrix
+        if hasattr(model, 'separate_encoder') and model.separate_encoder:
+            extra_dict['executor_obs'] = model.p_encoder.last_executor_obs
     return extra_dict
 
 
@@ -918,6 +930,12 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
             if hasattr(model, "last_weight_matrix") and model.last_weight_matrix is not None:
                 for i in range(model.emergency_queue_length):
                     original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
+            # log gradient mean into original_dict
+            for name, param in model.p_encoder.named_parameters():
+                if param.grad is not None:
+                    original_dict[f"gradient_{name}"] = param.grad.mean()
+                else:
+                    original_dict[f"gradient_{name}"] = 0
             break
     return original_dict
 
