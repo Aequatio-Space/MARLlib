@@ -98,13 +98,14 @@ class TripleHeadEncoder(nn.Module):
         else:
             emergency_embedding, weights_matrix = self.emergency_encoder(
                 {Constants.VECTOR_STATE: status, 'emergency': emergency})
-            # selection = gumbel_softmax(weights_matrix, temperature=0.1)
-            selected_emergency = torch.einsum('bi,bij->bj', weights_matrix,
+            selection = gumbel_softmax(weights_matrix.log(), temperature=0.1)
+            selected_emergency = torch.einsum('bi,bij->bj', selection,
                                               emergency.reshape(batch_size, -1, self.emergency_feature_dim))
             executor_obs = torch.cat((status, selected_emergency), dim=-1)
             output = self.status_grid_encoder({Constants.VECTOR_STATE: executor_obs,
                                                Constants.IMAGE_STATE: inputs[Constants.IMAGE_STATE]})
             self.last_weight_matrix = weights_matrix
+            self.last_selection = selection
             self.last_executor_obs = executor_obs
         status_embedding, grid_embedding = output[..., :self.status_grid_encoder.dims[0]], \
             output[..., self.status_grid_encoder.dims[0]:]

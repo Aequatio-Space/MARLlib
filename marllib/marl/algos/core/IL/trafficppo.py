@@ -479,10 +479,10 @@ def calculate_single_intrinsic(agents_position, alpha, anti_goal_distances, dist
 def match_aoi(all_emergencies_position: np.ndarray,
               emergency_position: np.ndarray,
               mask: np.ndarray):
-    indices = np.zeros((len(emergency_position)), dtype=np.int32)
+    indices = np.full((len(emergency_position)), dtype=np.int32, fill_value=-1)
     for i, this_timestep_pos in enumerate(emergency_position):
         if mask[i]:
-            match_status = all_emergencies_position[i] == this_timestep_pos
+            match_status = np.absolute(all_emergencies_position[i] - this_timestep_pos) < 1e-2
             find_index = np.where(match_status[:, 0] & match_status[:, 1])[0]
             if len(find_index) > 0:
                 indices[i] = find_index[0]
@@ -898,6 +898,7 @@ def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
             extra_dict[ANTI_GOAL_REWARD] = model.last_anti_goal_reward
         if hasattr(model.p_encoder, "last_weight_matrix"):
             extra_dict['weight_matrix'] = model.p_encoder.last_weight_matrix
+            extra_dict['selection'] = model.p_encoder.last_selection
         if hasattr(model, 'separate_encoder') and model.separate_encoder:
             extra_dict['executor_obs'] = model.p_encoder.last_executor_obs
     return extra_dict
@@ -930,6 +931,7 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
             if hasattr(model, "last_weight_matrix") and model.last_weight_matrix is not None:
                 for i in range(model.emergency_queue_length):
                     original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
+                original_dict[f'final_selection'] = model.last_selection
             # log gradient mean into original_dict
             for name, param in model.p_encoder.named_parameters():
                 if param.grad is not None:

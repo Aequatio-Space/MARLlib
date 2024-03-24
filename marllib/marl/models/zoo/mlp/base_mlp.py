@@ -790,6 +790,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 if self.separate_encoder and self.p_encoder.last_weight_matrix is not None:
                     # for logging purpose
                     self.last_weight_matrix = self.p_encoder.last_weight_matrix.mean(axis=0)
+                    self.last_selection = self.p_encoder.last_selection.argmax(axis=1)
                 # reset network mode
                 self.reset_states()
             else:
