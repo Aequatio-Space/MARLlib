@@ -105,7 +105,7 @@ class TripleHeadEncoder(nn.Module):
             output = self.status_grid_encoder({Constants.VECTOR_STATE: executor_obs,
                                                Constants.IMAGE_STATE: inputs[Constants.IMAGE_STATE]})
             self.last_weight_matrix = weights_matrix
-            self.last_selection = selection
+            self.last_selection = selection.argmax(axis=1)
             self.last_executor_obs = executor_obs
         status_embedding, grid_embedding = output[..., :self.status_grid_encoder.dims[0]], \
             output[..., self.status_grid_encoder.dims[0]:]

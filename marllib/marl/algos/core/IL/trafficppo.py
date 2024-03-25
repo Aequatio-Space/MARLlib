@@ -153,9 +153,13 @@ def relabel_for_sample_batch(
                 #     rearranged_indices = sample_batch['weight_matrix'].argsort()
                 #     for i in range(batch_size):
                 #         emergency_position[i] = emergency_position[i][rearranged_indices[i]]
+                if policy.model.separate_encoder:
+                    indices = sample_batch['buffer_indices'][np.arange(batch_size), sample_batch['selection']]
+                else:
+                    indices = None
                 intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
                                                 emergency_threshold=policy.model.emergency_threshold,
-                                                anti_goal_distances=anti_goal_distances,
+                                                anti_goal_distances=anti_goal_distances, indices=indices,
                                                 alpha=policy.model.alpha, mode=policy.model.intrinsic_mode)
             else:
                 discriminator: nn.Module = policy.model.discriminator
@@ -413,6 +417,7 @@ def calculate_intrinsic(agents_position: np.ndarray,
                         emergency_threshold: int,
                         fake=False,
                         anti_goal_distances: np.ndarray = None,
+                        indices=None,
                         mode: str = 'none',
                         alpha=0.1):
     """
@@ -422,8 +427,8 @@ def calculate_intrinsic(agents_position: np.ndarray,
     if len(emergency_position.shape) == 2:
         distances = np.linalg.norm(agents_position - emergency_position, axis=1)
         intrinsic = calculate_single_intrinsic(agents_position, alpha, anti_goal_distances, distances,
-                                               emergency_position,
-                                               emergency_states, emergency_threshold, fake, mode)
+                                               emergency_position, emergency_states, emergency_threshold,
+                                               fake, mode, indices=indices)
     elif len(emergency_position.shape) == 3:
         emergency_num = emergency_position.shape[1]
         intrinsic = np.zeros((len(agents_position), emergency_num))
@@ -443,7 +448,7 @@ def calculate_intrinsic(agents_position: np.ndarray,
 
 
 def calculate_single_intrinsic(agents_position, alpha, anti_goal_distances, distances, emergency_position,
-                               emergency_states, emergency_threshold, fake, mode):
+                               emergency_states, emergency_threshold, fake, mode, indices=None):
     mask = emergency_position.sum(axis=-1) != 0
     # find [aoi, (x,y)] array in state
     if not fake:
@@ -455,7 +460,8 @@ def calculate_single_intrinsic(agents_position, alpha, anti_goal_distances, dist
             else:
                 age_of_informations, all_emergencies_position = emergency_states[..., 2], np.stack(
                     [emergency_states[..., 0], emergency_states[..., 1]], axis=-1)
-                indices = match_aoi(all_emergencies_position, emergency_position, mask)
+                if indices is None:
+                    indices = match_aoi(all_emergencies_position, emergency_position, mask)
                 fetched_aois = age_of_informations[np.arange(len(age_of_informations)), indices]
                 if mode == 'aoi':
                     intrinsic = -fetched_aois * mask
@@ -482,7 +488,7 @@ def match_aoi(all_emergencies_position: np.ndarray,
     indices = np.full((len(emergency_position)), dtype=np.int32, fill_value=-1)
     for i, this_timestep_pos in enumerate(emergency_position):
         if mask[i]:
-            match_status = np.absolute(all_emergencies_position[i] - this_timestep_pos) < 1e-2
+            match_status = all_emergencies_position[i] == this_timestep_pos
             find_index = np.where(match_status[:, 0] & match_status[:, 1])[0]
             if len(find_index) > 0:
                 indices[i] = find_index[0]
@@ -663,11 +669,11 @@ def add_auxiliary_loss(
     model.train()
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
     # print the gradient of the model.p_encoder (query, keys, values)
-    for name, param in model.p_encoder.named_parameters():
-        if param.grad is not None:
-            logging.debug(f"Name: {name}, Gradient: {param.grad.mean()}")
-        else:
-            logging.debug(f"Name: {name}, Gradient: None")
+    # for name, param in model.p_encoder.named_parameters():
+    #     if param.grad is not None:
+    #         logging.debug(f"Name: {name}, Gradient: {param.grad.mean()}")
+    #     else:
+    #         logging.debug(f"Name: {name}, Gradient: None")
     model.eval()
     return total_loss
 
@@ -894,6 +900,7 @@ def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
     extra_dict = vf_preds_fetches(policy, input_dict, state_batches, model, action_dist)
     if hasattr(model, "with_task_allocation") and model.with_task_allocation:
         extra_dict[VIRTUAL_OBS] = model.last_virtual_obs.cpu().numpy()
+        extra_dict['buffer_indices'] = model.last_buffer_indices
         if hasattr(model, "sibling_rivalry") and model.sibling_rivalry:
             extra_dict[ANTI_GOAL_REWARD] = model.last_anti_goal_reward
         if hasattr(model.p_encoder, "last_weight_matrix"):
@@ -933,11 +940,11 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
                     original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
                 original_dict[f'final_selection'] = model.last_selection
             # log gradient mean into original_dict
-            for name, param in model.p_encoder.named_parameters():
-                if param.grad is not None:
-                    original_dict[f"gradient_{name}"] = param.grad.mean()
-                else:
-                    original_dict[f"gradient_{name}"] = 0
+            # for name, param in model.p_encoder.named_parameters():
+            #     if param.grad is not None:
+            #         original_dict[f"gradient_{name}"] = param.grad.mean()
+            #     else:
+            #         original_dict[f"gradient_{name}"] = 0
             break
     return original_dict
 

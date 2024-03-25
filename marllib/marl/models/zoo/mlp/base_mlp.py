@@ -575,7 +575,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         # Holds the last input, in case value branch is separate.
         self._last_obs = None
         self.q_flag = False
-        self.last_virtual_obs = None
+        self.last_virtual_obs = self.last_buffer_indices = None
         self.last_anti_goal_reward = None
         self.last_predicted_values = None
         self.actors = [self.p_encoder, self.p_branch]
@@ -790,7 +790,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 if self.separate_encoder and self.p_encoder.last_weight_matrix is not None:
                     # for logging purpose
                     self.last_weight_matrix = self.p_encoder.last_weight_matrix.mean(axis=0)
-                    self.last_selection = self.p_encoder.last_selection.argmax(axis=1)
+                    self.last_selection = self.p_encoder.last_selection
                 # reset network mode
                 self.reset_states()
             else:
@@ -971,6 +971,13 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     logging.debug(f"Crowdsim Eval Countdown: {self.evaluate_count_down}")
                 self.step_count += self.episode_length * self.num_envs
             self.last_virtual_obs = input_dict['obs']['obs']['agents_state']
+            self.last_buffer_indices = np.full((self.n_agents * self.num_envs, self.emergency_queue_length),
+                                               -1, dtype=np.int32)
+            for ind, buffer in enumerate(self.emergency_buffer):
+                if self.prioritized_buffer:
+                    self.last_buffer_indices[ind, :len(buffer)] = np.array(buffer.tolist())
+                else:
+                    self.last_buffer_indices[ind, :len(buffer)] = np.array(list(buffer))
             if self.sibling_rivalry:
                 if not_dummy_batch:
                     # valid_mask = (self.assign_status != -1) & (target_coverage[::self.n_agents] == 0)

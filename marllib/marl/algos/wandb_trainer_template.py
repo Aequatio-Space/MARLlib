@@ -272,13 +272,7 @@ def build_wandb_trainer(
                             del log_results['evaluation'][item]
                 except KeyError:
                     pass
-                flattened_dict = unwrap_and_concatenate_dict(log_results)
-                # from keys with prefix "info", extract those with "gradient" and assign it as a new prefix
-                # this thing fails!
-                gradient_dict = {key.replace("info", "gradient"): value for key, value in flattened_dict.items() if
-                                 "gradient" in key}
-                wandb.log(gradient_dict)
-                wandb.log(flattened_dict)
+                wandb.log(unwrap_and_concatenate_dict(log_results))
             return step_results
 
         @staticmethod
