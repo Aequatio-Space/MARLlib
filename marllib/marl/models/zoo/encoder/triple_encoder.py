@@ -98,7 +98,9 @@ class TripleHeadEncoder(nn.Module):
         else:
             emergency_embedding, weights_matrix = self.emergency_encoder(
                 {Constants.VECTOR_STATE: status, 'emergency': emergency})
-            selection = gumbel_softmax(weights_matrix.log(), temperature=0.1)
+            invalid_mask = (emergency.reshape(-1, self.emergency_queue_length, self.emergency_feature_dim) != 0).sum(
+                axis=2) == 0
+            selection = gumbel_softmax((weights_matrix + 1e-8).log() + invalid_mask * -1e8, temperature=0.1)
             selected_emergency = torch.einsum('bi,bij->bj', selection,
                                               emergency.reshape(batch_size, -1, self.emergency_feature_dim))
             executor_obs = torch.cat((status, selected_emergency), dim=-1)
