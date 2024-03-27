@@ -131,11 +131,11 @@ def relabel_for_sample_batch(
         if use_intrinsic:
             batch_size = emergency_states.shape[0]
             if policy.model.buffer_in_obs:
-                if policy.model.separate_encoder:
-                    emergency_position = sample_batch['executor_obs'][...,
-                                         status_dim:status_dim + emergency_feature_dim]
-                else:
-                    emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
+                # if policy.model.separate_encoder:
+                #     emergency_position = sample_batch['executor_obs'][...,
+                #                          status_dim:status_dim + emergency_feature_dim]
+                # else:
+                emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
                     batch_size, -1, emergency_feature_dim
                 )
             else:
@@ -149,10 +149,10 @@ def relabel_for_sample_batch(
                 else:
                     anti_goal_distances = None
                 # rearrange emergency according to weight matrix
-                # if policy.model.buffer_in_obs and policy.model.separate_encoder:
-                #     rearranged_indices = sample_batch['weight_matrix'].argsort()
-                #     for i in range(batch_size):
-                #         emergency_position[i] = emergency_position[i][rearranged_indices[i]]
+                if policy.model.buffer_in_obs and policy.model.separate_encoder:
+                    rearranged_indices = sample_batch['weight_matrix'].argsort()
+                    for i in range(batch_size):
+                        emergency_position[i] = emergency_position[i][rearranged_indices[i]]
                 if policy.model.separate_encoder:
                     indices = sample_batch['buffer_indices'][np.arange(batch_size), sample_batch['selection']]
                 else:
