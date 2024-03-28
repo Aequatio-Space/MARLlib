@@ -111,5 +111,4 @@ class TripleHeadEncoder(nn.Module):
             self.last_executor_obs = executor_obs
         status_embedding, grid_embedding = output[..., :self.status_grid_encoder.dims[0]], \
             output[..., self.status_grid_encoder.dims[0]:]
-        # x = self.merge_branch(torch.cat((status_embedding, emergency, grid_embedding), dim=-1))
         return torch.cat((status_embedding, grid_embedding), dim=-1)
