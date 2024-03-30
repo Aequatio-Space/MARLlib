@@ -131,13 +131,13 @@ def relabel_for_sample_batch(
         if use_intrinsic:
             batch_size = emergency_states.shape[0]
             if policy.model.buffer_in_obs:
-                # if policy.model.separate_encoder:
-                #     emergency_position = sample_batch['executor_obs'][...,
-                #                          status_dim:status_dim + emergency_feature_dim]
-                # else:
-                emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
-                    batch_size, -1, emergency_feature_dim
-                )
+                if policy.model.separate_encoder and 'gumbel' in policy.model.encoder_core_arch:
+                    emergency_position = sample_batch['executor_obs'][...,
+                                         status_dim:status_dim + emergency_feature_dim]
+                else:
+                    emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
+                        batch_size, -1, emergency_feature_dim
+                    )
             else:
                 emergency_position = observation[..., status_dim:status_dim + emergency_dim]
             if emergency_feature_dim > 2:
@@ -149,14 +149,19 @@ def relabel_for_sample_batch(
                 else:
                     anti_goal_distances = None
                 # rearrange emergency according to weight matrix
-                if policy.model.buffer_in_obs and policy.model.separate_encoder:
-                    rearranged_indices = sample_batch['weight_matrix'].argsort()
-                    for i in range(batch_size):
-                        emergency_position[i] = emergency_position[i][rearranged_indices[i]]
+                indices = None
                 if policy.model.separate_encoder:
-                    indices = sample_batch['buffer_indices'][np.arange(batch_size), sample_batch['selection']]
-                else:
-                    indices = None
+                    core_arch = policy.model.encoder_core_arch
+                    if 'attention' in core_arch:
+                        if 'gumbel' not in core_arch:
+                            if 'weight_matrix' not in sample_batch:
+                                raise ValueError("weight_matrix is not in sample_batch.")
+                            rearranged_indices = sample_batch['weight_matrix'].argsort()
+                            for i in range(batch_size):
+                                emergency_position[i] = emergency_position[i][rearranged_indices[i]]
+                        else:
+                            indices = sample_batch['buffer_indices'][np.arange(batch_size), sample_batch['selection']]
+
                 intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
                                                 emergency_threshold=policy.model.emergency_threshold,
                                                 anti_goal_distances=anti_goal_distances, indices=indices,
@@ -903,11 +908,12 @@ def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
         extra_dict['buffer_indices'] = model.last_buffer_indices
         if hasattr(model, "sibling_rivalry") and model.sibling_rivalry:
             extra_dict[ANTI_GOAL_REWARD] = model.last_anti_goal_reward
-        if hasattr(model.p_encoder, "last_weight_matrix"):
-            extra_dict['weight_matrix'] = model.p_encoder.last_weight_matrix
-            extra_dict['selection'] = model.p_encoder.last_selection
-        if hasattr(model, 'separate_encoder') and model.separate_encoder:
-            extra_dict['executor_obs'] = model.p_encoder.last_executor_obs
+        for item in ['weight_matrix', 'selection', 'executor_obs']:
+            model_item_name = 'last_' + item
+            if hasattr(model.p_encoder, model_item_name):
+                result = getattr(model.p_encoder, model_item_name)
+                if result is not None:
+                    extra_dict[item] = result
     return extra_dict
 
 

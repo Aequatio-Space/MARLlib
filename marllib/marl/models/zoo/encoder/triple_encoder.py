@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 from gym import spaces
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
@@ -50,34 +52,42 @@ class TripleHeadEncoder(nn.Module):
         super(TripleHeadEncoder, self).__init__()
         self.custom_config = custom_model_config
         self.model_arch_args = model_arch_args
+        emergency_encoder_arch_args = self.model_arch_args['emergency_encoder']['custom_model_config'][
+            'model_arch_args']
         self.obs_space = obs_space
         self.last_weight_matrix = self.last_executor_obs = self.last_selection = None
         self.activation = self.custom_config.get("fcnet_activation")
         self.emergency_dim = self.custom_config['emergency_dim']
+        self.emergency_queue_length = model_arch_args['emergency_queue_length']
+        self.emergency_encoder_arch = emergency_encoder_arch_args['core_arch']
+        # mlp, mlp_residual, attention, attention_gumbel, attention_gumbel_mock
         # Two encoders, one for image and vector input, one for vector input.
         self.emergency_feature_dim = 3
+        if self.emergency_encoder_arch == 'mlp' or self.emergency_encoder_arch == 'attention':
+            agents_state_dim = self.custom_config['status_dim']
+        elif 'residual' in self.emergency_encoder_arch:
+            agents_state_dim = self.custom_config[
+                                   'status_dim'] + self.emergency_feature_dim * self.emergency_queue_length
+        else:
+            agents_state_dim = self.custom_config['status_dim'] + self.emergency_feature_dim
         status_grid_space = dict(obs=spaces.Dict({
-            'agents_state': spaces.Box(low=0, high=2, shape=(self.custom_config['status_dim'] +
-                                                             self.emergency_feature_dim,), dtype=np.float32),
+            'agents_state': spaces.Box(low=0, high=2, shape=(agents_state_dim,), dtype=np.float32),
             'grid': spaces.Box(low=0, high=1, shape=eval(self.custom_config['grid_dim']), dtype=np.float32)
         }))
         emergency_obs_space = dict(obs=spaces.Box(low=0, high=2, shape=(self.emergency_dim,), dtype=np.float32))
         self.status_grid_encoder = BaseEncoder(self.model_arch_args['status_encoder'], status_grid_space)
-        emergency_encoder_arch_args = self.model_arch_args['emergency_encoder']['custom_model_config'][
-            'model_arch_args']
 
-        self.emergency_encoder_arch = emergency_encoder_arch_args['core_arch']
-        if self.emergency_encoder_arch == 'mlp':
-            self.emergency_encoder = BaseEncoder(emergency_encoder_arch_args, emergency_obs_space)
-        elif self.emergency_encoder_arch == 'attention':
+        if 'mlp' in self.emergency_encoder_arch:
+            actual_input_args = {'custom_model_config': {'model_arch_args': emergency_encoder_arch_args}}
+            self.emergency_encoder = BaseEncoder(actual_input_args, emergency_obs_space)
+        elif 'attention' in self.emergency_encoder_arch:
             emergency_encoder_arch_args['emergency_queue_length'] = model_arch_args['emergency_queue_length']
-            emergency_encoder_arch_args['agents_state_dim'] = (status_grid_space['obs']['agents_state'].shape[0] -
-                                                               self.emergency_feature_dim)
+            emergency_encoder_arch_args['agents_state_dim'] = (self.custom_config['status_dim'])
             emergency_encoder_arch_args['num_heads'] = model_arch_args['num_heads']
             emergency_encoder_arch_args['attention_dim'] = model_arch_args['attention_dim'] * model_arch_args[
                 'num_heads']
             emergency_encoder_arch_args['emergency_feature'] = self.emergency_feature_dim
-            self.emergency_queue_length = model_arch_args['emergency_queue_length']
+            emergency_encoder_arch_args['with_softmax'] = 'gumbel' not in self.emergency_encoder_arch
             self.emergency_encoder = CrowdSimAttention(emergency_encoder_arch_args)
         else:
             raise ValueError(f"Emergency encoder architecture {self.emergency_encoder_arch} not supported.")
@@ -87,28 +97,55 @@ class TripleHeadEncoder(nn.Module):
             initializer=normc_initializer(1.0),
             activation_fn=None,
         )
-        self.output_dim = self.status_grid_encoder.output_dim
+        if 'gumbel' in self.emergency_encoder_arch:
+            self.output_dim = self.status_grid_encoder.output_dim
+        else:
+            self.output_dim = self.status_grid_encoder.output_dim + self.emergency_encoder.output_dim
 
     def forward(self, inputs):
         status = inputs[Constants.VECTOR_STATE][..., :-self.emergency_dim]
         emergency = inputs[Constants.VECTOR_STATE][..., -self.emergency_dim:]
         batch_size = emergency.shape[0]
-        if self.emergency_encoder_arch == 'mlp':
+        if 'mlp' in self.emergency_encoder_arch:
             emergency_embedding = self.emergency_encoder(emergency)
+            if 'residual' in self.emergency_encoder_arch:
+                executor_obs = inputs[Constants.VECTOR_STATE]
+            else:
+                executor_obs = status
         else:
             emergency_embedding, weights_matrix = self.emergency_encoder(
-                {Constants.VECTOR_STATE: status, 'emergency': emergency})
-            invalid_mask = (emergency.reshape(-1, self.emergency_queue_length, self.emergency_feature_dim) != 0).sum(
-                axis=2) == 0
-            selection = gumbel_softmax((weights_matrix + 1e-8).log() + invalid_mask * -1e8, temperature=0.1)
-            selected_emergency = torch.einsum('bi,bij->bj', selection,
-                                              emergency.reshape(batch_size, -1, self.emergency_feature_dim))
-            executor_obs = torch.cat((status, selected_emergency), dim=-1)
-            output = self.status_grid_encoder({Constants.VECTOR_STATE: executor_obs,
-                                               Constants.IMAGE_STATE: inputs[Constants.IMAGE_STATE]})
+                {Constants.VECTOR_STATE: status, 'emergency': emergency}
+            )
             self.last_weight_matrix = weights_matrix
-            self.last_selection = selection.argmax(axis=1)
-            self.last_executor_obs = executor_obs
-        status_embedding, grid_embedding = output[..., :self.status_grid_encoder.dims[0]], \
-            output[..., self.status_grid_encoder.dims[0]:]
-        return torch.cat((status_embedding, grid_embedding), dim=-1)
+            if 'gumbel' in self.emergency_encoder_arch:
+                invalid_mask = (emergency.reshape(-1, self.emergency_queue_length,
+                                                  self.emergency_feature_dim) != 0).sum(
+                    axis=2) == 0
+                if 'mock' in self.emergency_encoder_arch:
+                    # randomly generate selection result (as one hot vector)
+                    selection = torch.randint(0, self.emergency_queue_length, (batch_size,))
+                    # convert to one hot
+                    selection = F.one_hot(selection, self.emergency_queue_length).to(torch.float32).to(emergency.device)
+                else:
+                    weights_matrix[invalid_mask] = -1e8
+                    selection = gumbel_softmax(weights_matrix + 1e-8, temperature=0.1)
+                logging.debug(f"selection: {selection[:5]}")
+                selected_emergency = torch.einsum('bi,bij->bj', selection,
+                                                  emergency.reshape(batch_size, -1, self.emergency_feature_dim))
+                executor_obs = torch.cat((status, selected_emergency), dim=-1)
+                self.last_selection = selection.argmax(axis=1)
+            elif 'residual' in self.emergency_encoder_arch:
+                executor_obs = inputs[Constants.VECTOR_STATE]
+                self.last_selection = weights_matrix.argmax(axis=1)
+            else:
+                executor_obs = status
+                self.last_selection = weights_matrix.argmax(axis=1)
+        output = self.status_grid_encoder(
+            {Constants.VECTOR_STATE: executor_obs,
+             Constants.IMAGE_STATE: inputs[Constants.IMAGE_STATE]}
+        )
+        self.last_executor_obs = executor_obs
+        if 'gumbel' not in self.emergency_encoder_arch:
+            return torch.cat((emergency_embedding, output), dim=-1)
+        else:
+            return output

@@ -31,9 +31,10 @@ class ScaledDotProductAttention(nn.Module):
         - **attn**: tensor containing the attention (alignment) from the encoder outputs.
     """
 
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, with_softmax=True):
         super(ScaledDotProductAttention, self).__init__()
         self.sqrt_dim = np.sqrt(dim)
+        self.with_softmax = with_softmax
 
     def forward(self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None) -> Tuple[
         Tensor, Tensor]:
@@ -42,7 +43,10 @@ class ScaledDotProductAttention(nn.Module):
         if mask is not None:
             score.masked_fill_(mask.view(score.size()), -float('Inf'))
 
-        attn = F.softmax(score, -1)
+        if self.with_softmax:
+            attn = F.softmax(score, -1)
+        else:
+            attn = score
         context = torch.bmm(attn, value)
         return context, attn
 
@@ -62,6 +66,7 @@ class CrowdSimAttention(nn.Module):
         self.agents_state_dim = model_config['agents_state_dim']
         self.emergency_feature = model_config['emergency_feature']
         self.num_heads = model_config['num_heads']
+        self.with_softmax = model_config['with_softmax']
         self.keys_fc = SlimFC(
             in_size=self.emergency_feature,
             out_size=self.attention_dim,
@@ -77,7 +82,7 @@ class CrowdSimAttention(nn.Module):
             out_size=self.attention_dim,
             initializer=normc_initializer(0.01),
             activation_fn=None)
-        self.attention = ScaledDotProductAttention(self.attention_dim)
+        self.attention = ScaledDotProductAttention(self.attention_dim, self.with_softmax)
         self.output_dim = self.attention_dim
 
     def forward(self, input_dict: Dict[str, TensorType]) -> (TensorType, List[TensorType]):

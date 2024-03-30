@@ -446,14 +446,18 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
 
         # decide the model arch
         self.last_weight_matrix = None
+        self.action_space = action_space
         self.custom_config = model_config["custom_model_config"]
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
         self.status_dim = self.custom_config["status_dim"]
+        self.num_outputs = num_outputs
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
         self.activation = model_config.get("fcnet_activation")
         self.model_arch_args = self.custom_config['model_arch_args']
         self.with_task_allocation = self.model_arch_args['dynamic_zero_shot']
+        if self.model_arch_args['use_action_mask']:
+            self.custom_config["mask_flag"] = True
         logging.debug(f"CrowdSimNet model_arch_args: {pprint.pformat(self.model_arch_args)}")
         if self.model_arch_args['local_mode']:
             self.device = torch.device("cpu")
@@ -548,6 +552,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         # encoder
         if self.separate_encoder:
             assert self.buffer_in_obs, "buffer must in observation for separate encoder"
+            encoder_arch = self.model_arch_args['emergency_encoder']['custom_model_config'][
+                'model_arch_args']
+            self.encoder_core_arch = encoder_arch['core_arch'] = self.model_arch_args['encoder_core_arch']
             self.vf_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
                 self.device)
             self.p_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
@@ -997,6 +1004,29 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 input_dict['obs']['obs']['agents_state'] = input_dict['virtual_obs']
             except KeyError:
                 logging.debug("No virtual obs found")
+        if self.custom_config['mask_flag']:
+            batch_size = input_dict['obs']['obs']['agents_state'].shape[0]
+            # warning, this may not adapt to MultiDiscrete and Continuous
+            mask = torch.zeros((batch_size, self.num_outputs), dtype=torch.float32)
+            agents_pos = input_dict['obs']['obs']['agents_state'][:, self.n_agents + 2: self.n_agents + 4]
+            emergencies_pos = input_dict['obs']['obs']['agents_state'][:, self.status_dim:self.status_dim +
+                                                                                          self.emergency_feature_dim]
+            no_emergencies_mask = torch.all(emergencies_pos == 0, dim=-1)
+            mask[no_emergencies_mask, :] = 1
+            if self.emergency_feature_dim > 2:
+                emergencies_pos = emergencies_pos[..., :2]
+            difference = agents_pos - emergencies_pos
+            # Compute the signs of the elements in some_array
+            quadrant_x = torch.sign(difference[:, 0]).to(torch.int32)
+            quadrant_y = torch.sign(difference[:, 1]).to(torch.int32)
+            quadrant_labels = torch.zeros(batch_size, dtype=torch.int32)
+            quadrant_labels[(quadrant_x == 1) & (quadrant_y == 1)] = 1
+            quadrant_labels[(quadrant_x == -1) & (quadrant_y == 1)] = 2
+            quadrant_labels[(quadrant_x == -1) & (quadrant_y == -1)] = 3
+            quadrant_labels[(quadrant_x == 1) & (quadrant_y == -1)] = 4
+            for index, item in enumerate(quadrant_labels):
+                mask[index, Constants.ACTION_VALID_DICT[item.item()]] = 1
+            input_dict['obs']['action_mask'] = mask.to(self.device)
 
     def milp_allocate(self, actual_emergency_indices, agent_nums, agent_stop_index, allocation_agents, env_stop_index,
                       outputs, selected_emergencies):

@@ -41,3 +41,7 @@ model_arch_args:
         core_arch: attention
         attention_dim: 64
         num_heads: 2
+        fc_layer: 3
+        out_dim_fc_0: 32
+        out_dim_fc_1: 32
+        out_dim_fc_2: 32
