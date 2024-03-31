@@ -1015,7 +1015,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             mask[no_emergencies_mask, :] = 1
             if self.emergency_feature_dim > 2:
                 emergencies_pos = emergencies_pos[..., :2]
-            difference = agents_pos - emergencies_pos
+            difference = emergencies_pos - agents_pos
             # Compute the signs of the elements in some_array
             quadrant_x = torch.sign(difference[:, 0]).to(torch.int32)
             quadrant_y = torch.sign(difference[:, 1]).to(torch.int32)
@@ -1284,7 +1284,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     if self.emergency_feature_dim > 2:
                         new_emergency_xy = np.concatenate([new_emergency_xy, [head_distance]])
                     all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \
-                        torch.from_numpy(new_emergency_xy)
+                        tor
+                    ch.from_numpy(new_emergency_xy)
             else:
                 self.emergency_indices[i] = -1
                 self.emergency_target[i].fill(-1)

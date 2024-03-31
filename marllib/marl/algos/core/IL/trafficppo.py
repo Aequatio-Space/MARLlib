@@ -788,6 +788,8 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
         start_indices, end_indices = get_emergency_start_end_numba(emergency_in_lower_level_obs)
         selected_emergencies = emergency_in_lower_level_obs[np.array(start_indices)]
         # construct a dict from emergency_xy
+        if emergency_feature_dim > 2:
+            selected_emergencies = selected_emergencies[..., 0:2]
         emergency_dict = {(x, y): i for i, (x, y) in enumerate(emergency_xy)}
         lower_level_dict = {(x, y): i for i, (x, y) in enumerate(selected_emergencies)}
         for i, (action, emergency) in enumerate(zip(assign_actions, allocation_list)):
@@ -795,6 +797,9 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
             coordinates_tuple = (emergency[0], emergency[1])
             emergency_index = emergency_dict.get(coordinates_tuple, -1)
             lower_level_index = lower_level_dict.get(coordinates_tuple, -1)
+            distances = np.linalg.norm(agents_pos[i] - emergency, axis=1)
+            discount_factor = np.zeros(len(distances))
+            discount_factor[np.argsort(distances)] = np.linspace(1 / len(distances), 1, len(distances))
             if lower_level_index == -1:
                 emergency_cover_reward = 0
             else:
@@ -811,8 +816,9 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
                     if np.isnan(mean_reward):
                         mean_reward = 0
                 # emergency_cover_reward = mean_reward + (assignment_status[emergency_index] == action)
-                emergency_cover_reward = mean_reward
+                emergency_cover_reward = mean_reward * (1 - discount_factor[action])
                 logging.debug(f"delta: {delta}, mean_reward: {mean_reward}, with_emergency: {emergency_cover_reward}")
+        assign_rewards[i] = emergency_cover_reward
 
 
 def add_regress_loss_old(
