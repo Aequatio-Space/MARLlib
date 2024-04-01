@@ -38,7 +38,7 @@ agent_selector_arch:
       out_dim_fc_1: 128
       out_dim_fc_2: 64
       conv_layer: 1
-      out_channel_layer_0: 8
+      out_channel_layer_0: 16
       kernel_size_layer_0: 3
       stride_layer_0: 1
       padding_layer_0: 2

@@ -186,7 +186,7 @@ class BaseEncoder(nn.Module, MixInputEncoderMixin):
             x = torch.mean(x, (2, 3))
             output = x.reshape((B, L, -1))
         else:
-            # logging.debug(f"cnn encoder input shape:{inputs.shape}")
+            logging.debug(f"cnn encoder input shape:{inputs.shape}")
             output = cnn_network(inputs)  # Does not understand why the channel dim is put at the last dim
             # logging.debug(f"cnn encoder output shape:{x.shape}")
             # output = torch.mean(x, (2, 3))

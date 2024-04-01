@@ -604,7 +604,7 @@ def add_auxiliary_loss(
         parameters_list = [item for item in selector.parameters()]
         mean_reward = torch.tensor(0.0).to(device)
         if len(parameters_list) > 0 and model.step_count > model.switch_step:
-            rl_optimizer = optim.Adam(parameters_list, lr=0.001)
+            rl_optimizer = model.high_level_optim
             assert 0 <= model.rl_gamma <= 1, "gamma should be in [0, 1]"
             selector.train()
             full_batches = []
@@ -620,7 +620,8 @@ def add_auxiliary_loss(
                 for assign_agent_batch, lower_agent_batch in zip(full_batches, lower_agent_batches):
                     emergency_states = get_emergency_state(emergency_dim, lower_agent_batch, num_agents, status_dim,
                                                            this_emergency_count)
-                    calculate_assign_rewards_lite(assign_agent_batch, lower_agent_batch, emergency_states, status_dim,
+                    calculate_assign_rewards_lite(model, assign_agent_batch, lower_agent_batch, emergency_states,
+                                                  status_dim,
                                                   emergency_feature_dim, num_agents,
                                                   agents_feature=(policy.model.selector_input_dim - 2) // num_agents,
                                                   mode=policy.model.reward_mode,
@@ -749,7 +750,8 @@ def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewa
     # logging.debug(f"rewards for assignment agent: {assign_rewards}")
 
 
-def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_batch: SampleBatch,
+def calculate_assign_rewards_lite(model: ModelV2,
+                                  assign_agent_batch: SampleBatch, lower_agent_batch: SampleBatch,
                                   emergency_states: np.ndarray, status_dim: int, emergency_feature_dim: int,
                                   n_agents: int, agents_feature: int, emergency_threshold: int,
                                   mode: str = 'mix', fail_hint: bool = False):
@@ -783,42 +785,28 @@ def calculate_assign_rewards_lite(assign_agent_batch: SampleBatch, lower_agent_b
             emergency_cover_reward = 1 - discount_factor[action]
             assign_rewards[i] = emergency_cover_reward
     else:
-        # abandoned.
-        emergency_xy = emergency_states[..., 0:2][-1]
-        start_indices, end_indices = get_emergency_start_end_numba(emergency_in_lower_level_obs)
-        selected_emergencies = emergency_in_lower_level_obs[np.array(start_indices)]
-        # construct a dict from emergency_xy
-        if emergency_feature_dim > 2:
-            selected_emergencies = selected_emergencies[..., 0:2]
-        emergency_dict = {(x, y): i for i, (x, y) in enumerate(emergency_xy)}
-        lower_level_dict = {(x, y): i for i, (x, y) in enumerate(selected_emergencies)}
-        for i, (action, emergency) in enumerate(zip(assign_actions, allocation_list)):
+        timesteps = assign_agent_batch['timesteps']
+        rewards_by_agent = lower_level_rewards.reshape(-1, n_agents)
+        for i, (current_time, action, emergency) in enumerate(zip(timesteps, assign_actions, allocation_list)):
             # discount_factor = (episode_length - delta) / episode_length
-            coordinates_tuple = (emergency[0], emergency[1])
-            emergency_index = emergency_dict.get(coordinates_tuple, -1)
-            lower_level_index = lower_level_dict.get(coordinates_tuple, -1)
             distances = np.linalg.norm(agents_pos[i] - emergency, axis=1)
             discount_factor = np.zeros(len(distances))
             discount_factor[np.argsort(distances)] = np.linspace(1 / len(distances), 1, len(distances))
-            if lower_level_index == -1:
+            if mode == 'none':
                 emergency_cover_reward = 0
             else:
-                if mode == 'none':
-                    mean_reward = 0.0
+                mean_reward = np.mean(rewards_by_agent[current_time:current_time + emergency_threshold, action])
+                model.reward_min = min(model.reward_min, mean_reward)
+                model.reward_max = max(model.reward_max, mean_reward)
+                # scale the reward according to reward_min and reward_max
+                if model.reward_max - model.reward_min > 0:
+                    mean_reward = (mean_reward - model.reward_min) / (model.reward_max - model.reward_min)
+                if mean_reward > 0:
+                    emergency_cover_reward = mean_reward * (1 - discount_factor[action])
                 else:
-                    delta = end_indices[lower_level_index] - start_indices[lower_level_index]
-                    if delta > 0:
-                        raw_reward = lower_level_rewards[start_indices[lower_level_index]:
-                                                         end_indices[lower_level_index]]
-                        mean_reward = np.mean(raw_reward) / 2
-                    else:
-                        mean_reward = 0.0
-                    if np.isnan(mean_reward):
-                        mean_reward = 0
-                # emergency_cover_reward = mean_reward + (assignment_status[emergency_index] == action)
-                emergency_cover_reward = mean_reward * (1 - discount_factor[action])
-                logging.debug(f"delta: {delta}, mean_reward: {mean_reward}, with_emergency: {emergency_cover_reward}")
-        assign_rewards[i] = emergency_cover_reward
+                    emergency_cover_reward = mean_reward * discount_factor[action]
+                logging.debug(f"mean_reward: {mean_reward}, with_emergency: {emergency_cover_reward}")
+            assign_rewards[i] = emergency_cover_reward
 
 
 def add_regress_loss_old(
@@ -936,6 +924,8 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
         for model in policy.model_gpu_towers:
             if 'RL' in model.selector_type:
                 original_dict['assign_reward'] = torch.mean(torch.stack(policy.get_tower_stats("mean_assign_reward")))
+                original_dict['assign_reward_max'] = model.reward_max
+                original_dict['assign_reward_min'] = model.reward_min
                 original_dict['rl_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_rl_loss")))
             if model.last_emergency_mode is not None:
                 for i in range(model.n_agents):
@@ -945,8 +935,6 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
                     original_dict[f'agent_{i}_queue_length'] = model.last_emergency_queue_length[i]
             if hasattr(model, "intrinsic_mode") and model.intrinsic_mode == 'aim':
                 original_dict['aim_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_aim_loss")))
-                original_dict['aim_reward_max'] = model.reward_max
-                original_dict['aim_reward_min'] = model.reward_min
             if hasattr(model, "last_weight_matrix") and model.last_weight_matrix is not None:
                 for i in range(model.emergency_queue_length):
                     original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
