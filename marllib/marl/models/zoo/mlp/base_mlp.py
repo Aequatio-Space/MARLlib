@@ -14,6 +14,7 @@ import wandb
 from gym import spaces
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
 from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
+from marllib.marl.models.zoo.encoder.attention_encoder import CrowdSimAttention, ScaledDotProductAttention
 from numba import njit
 from ray.rllib.models.torch.misc import SlimFC, normc_initializer
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
@@ -233,13 +234,44 @@ class Predictor(nn.Module):
 
 
 class AgentSelector(nn.Module):
-    def __init__(self, model_config, obs_space, num_agents):
+    def __init__(self, model_config: dict, obs_space, num_agents):
         super(AgentSelector, self).__init__()
         self.num_agents = num_agents
         self.activation = nn.ReLU
-        self.encoder = BaseEncoder(model_config, obs_space)
-        self.use_2d_state = 'conv_layer' in model_config['custom_model_config']['model_arch_args']
+        self.custom_config = model_config['custom_model_config']
+        self.model_arch_args = model_config['custom_model_config']['model_arch_args']
+        self.use_2d_state = 'conv_layer' in self.model_arch_args
+        self.use_attention = 'attention' in self.model_arch_args['core_arch']
+        self.emergency_feature_dim = self.custom_config['emergency_feature_dim']
+        self.last_weight_matrix = None
+        if self.use_attention:
+            # does not support 1d state
+            # agent_encoder_arch = {}
+            # agent_encoder_arch['emergency_queue_length'] = self.custom_config['emergency_queue_length']
+            # agent_encoder_arch['agents_state_dim'] = self.custom_config['status_dim']
+            # agent_encoder_arch['num_heads'] = self.model_arch_args['num_heads']
+            # agent_encoder_arch['attention_dim'] = self.model_arch_args['attention_dim'] * self.model_arch_args[
+            #     'num_heads']
+            # agent_encoder_arch['emergency_feature'] = self.emergency_feature_dim
+            # agent_encoder_arch['with_softmax'] = True
+            self.attention = ScaledDotProductAttention(self.model_arch_args['attention_dim'], with_softmax=True)
+            encoder_obs_space = spaces.Dict({
+                "obs": spaces.Dict({
+                    Constants.VECTOR_STATE: spaces.Box(low=-float('inf'), high=float('inf'),
+                                                       shape=(self.custom_config['status_dim'],)),
+                    Constants.IMAGE_STATE: spaces.Box(low=-float('inf'), high=float('inf'),
+                                                      shape=(1, *obs_space['obs'][Constants.IMAGE_STATE].shape[1:])),
+                })
+            })
+        else:
+            encoder_obs_space = obs_space
+        self.encoder = BaseEncoder(model_config, encoder_obs_space)
         # self.dropout = nn.Dropout(p=0.3)
+        self.query_fc = SlimFC(
+            in_size=self.emergency_feature_dim,
+            out_size=self.encoder.output_dim,
+            initializer=normc_initializer(0.01),
+            activation_fn=None)
         self.out_branch = SlimFC(
             in_size=self.encoder.output_dim,
             out_size=num_agents,
@@ -248,13 +280,37 @@ class AgentSelector(nn.Module):
 
     def forward(self, input_obs, invalid_mask=None, grid=None):
         if self.use_2d_state:
-            input_dict = {
-                "obs": input_obs,
-                "grid": grid
-            }
-            embedding = self.encoder(input_dict)
+            if self.use_attention:
+                agents_feature, emergency = (input_obs[..., :-self.emergency_feature_dim],
+                                             input_obs[..., -self.emergency_feature_dim:])
+                logging.debug("Agent State Shape: {}".format(agents_feature.shape))
+                logging.debug("Grid Shape: {}".format(grid.shape))
+                batch_size = agents_feature.shape[0]
+                input_dict = {
+                    "obs": agents_feature.reshape(self.num_agents * batch_size, self.custom_config['status_dim']),
+                    "grid": grid.reshape(self.num_agents * batch_size, 1, *grid.shape[2:])
+                }
+                embedding = self.encoder(input_dict).reshape(batch_size, self.num_agents, -1)
+                query_embedding = self.query_fc(emergency).reshape(batch_size, 1, -1)
+                embedding, weights_matrix = self.attention(query_embedding, embedding, embedding)
+                embedding, weights_matrix = embedding.squeeze(1), weights_matrix.squeeze(1)
+                self.last_weight_matrix = weights_matrix
+            else:
+                input_dict = {
+                    "obs": input_obs,
+                    "grid": grid
+                }
+                embedding = self.encoder(input_dict)
+
         else:
-            embedding = self.encoder(input_obs)
+            if self.use_attention:
+                agents_feature, emergency = (input_obs[..., :-self.emergency_feature_dim],
+                                             input_obs[..., -self.emergency_feature_dim:])
+                agents_feature = agents_feature.reshape(-1, self.num_agents, self.custom_config['status_dim'])
+                embedding = self.encoder(agents_feature)
+                embedding = self.attention(embedding, emergency)
+            else:
+                embedding = self.encoder(input_obs)
         raw_output = self.out_branch(embedding)
         if invalid_mask is not None:
             raw_output -= invalid_mask * (FLOAT_MAX / 2)
@@ -513,6 +569,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.reward_mode = self.model_arch_args['reward_mode']
         self.fail_hint = self.model_arch_args['fail_hint']
         self.use_random = self.model_arch_args['use_random']
+        self.use_attention = self.model_arch_args['use_attention']
         self.train_count = 0
         # self.anti_reward_sync_count = 0
         emergency_path_name = os.path.join(get_project_root(), 'datasets',
@@ -587,16 +644,18 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.last_predicted_values = None
         self.actors = [self.p_encoder, self.p_branch]
         self.critics = [self.vf_encoder, self.vf_branch]
-        self.selector_input_dim = self.n_agents * (2 + self.emergency_queue_length * 2) + 2
+        self.agent_selector_query_dim = 2
+        self.selector_input_dim = (self.n_agents * (2 + self.emergency_queue_length * self.agent_selector_query_dim)
+                                   + self.agent_selector_query_dim)
         self.actor_initialized_parameters = self.actor_parameters()
         self.aux_selector = None
         agent_selector_arch: dict = model_config['custom_model_config']['agent_selector_arch']
-
+        selector_custom_configs = agent_selector_arch['custom_model_config']
         if not self.rl_use_cnn:
             selector_obs_space = spaces.Dict({
                 "obs": spaces.Box(low=-float('inf'), high=float('inf'), shape=(self.selector_input_dim,)),
             })
-            agent_selector_arch['custom_model_config']['model_arch_args'].pop('conv_layer')
+            selector_custom_configs['model_arch_args'].pop('conv_layer')
         else:
             input_shape = (self.n_agents, *self.full_obs_space['obs'][Constants.IMAGE_STATE].shape[1:])
             selector_obs_space = spaces.Dict({
@@ -609,6 +668,13 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             })
         for item in ['fcnet_activation', 'conv_activation']:
             agent_selector_arch[item] = model_config[item]
+        if self.use_attention:
+            for item in ['emergency_queue_length']:
+                selector_custom_configs[item] = getattr(self, item)
+            selector_custom_configs['model_arch_args']['core_arch'] = 'attention'
+            selector_custom_configs['status_dim'] = (
+                                                                self.selector_input_dim - self.agent_selector_query_dim) // self.n_agents
+        selector_custom_configs['emergency_feature_dim'] = self.agent_selector_query_dim
         if len(self.selector_type) == 1:
             mode = self.selector_type[0]
             if mode == "greedy":
@@ -800,9 +866,18 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     setattr(self, 'last_' + item, getattr(self, item))
                 self.last_emergency_queue_length = [len(q) for q in self.emergency_buffer[:self.n_agents]]
                 if self.separate_encoder and self.p_encoder.last_weight_matrix is not None:
+                    if self.use_attention:
+                        raise NotImplementedError("Separate encoder + Assign Level Attention "
+                                                  "may lead to unexpected behavior")
                     # for logging purpose
                     self.last_weight_matrix = self.p_encoder.last_weight_matrix.mean(axis=0)
                     self.last_selection = self.p_encoder.last_selection
+                elif self.use_attention:
+                    if self.selector.last_weight_matrix is not None:
+                        self.last_weight_matrix = self.selector.last_weight_matrix.mean(axis=0)
+                        logging.debug(f"Last weight matrix: {self.last_weight_matrix}")
+                    else:
+                        self.last_weight_matrix = torch.zeros(self.n_agents)
                 # reset network mode
                 self.reset_states()
             else:

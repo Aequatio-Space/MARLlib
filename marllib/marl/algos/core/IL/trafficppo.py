@@ -935,10 +935,13 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
                     original_dict[f'agent_{i}_queue_length'] = model.last_emergency_queue_length[i]
             if hasattr(model, "intrinsic_mode") and model.intrinsic_mode == 'aim':
                 original_dict['aim_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_aim_loss")))
-            if hasattr(model, "last_weight_matrix") and model.last_weight_matrix is not None:
-                for i in range(model.emergency_queue_length):
-                    original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
+            if hasattr(model, 'last_selection') and model.last_selection is not None:
                 original_dict[f'final_selection'] = model.last_selection
+            if hasattr(model, "last_weight_matrix") and model.last_weight_matrix is not None:
+                length = len(model.last_weight_matrix)
+                for i in range(length):
+                    original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
+
             # log gradient mean into original_dict
             # for name, param in model.p_encoder.named_parameters():
             #     if param.grad is not None:

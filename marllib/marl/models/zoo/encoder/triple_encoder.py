@@ -62,7 +62,7 @@ class TripleHeadEncoder(nn.Module):
         self.emergency_encoder_arch = emergency_encoder_arch_args['core_arch']
         # mlp, mlp_residual, attention, attention_gumbel, attention_gumbel_mock
         # Two encoders, one for image and vector input, one for vector input.
-        self.emergency_feature_dim = 3
+        self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
         if self.emergency_encoder_arch == 'mlp' or self.emergency_encoder_arch == 'attention':
             agents_state_dim = self.custom_config['status_dim']
         elif 'residual' in self.emergency_encoder_arch:

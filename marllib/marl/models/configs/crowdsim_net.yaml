@@ -43,3 +43,5 @@ agent_selector_arch:
       stride_layer_0: 1
       padding_layer_0: 2
       pool_size_layer_0: 3
+      num_heads: 1
+      attention_dim: 32
