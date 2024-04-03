@@ -7,6 +7,7 @@ from collections import deque
 from functools import reduce
 from heapq import heappush, heappop
 from typing import Tuple, Union
+from warp_drive.pcgrad import PCGrad
 
 import numpy as np
 import pandas as pd
@@ -540,6 +541,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.buffer_in_obs = self.model_arch_args['buffer_in_obs']
         self.prioritized_buffer = self.model_arch_args['prioritized_buffer']
         self.NN_buffer = self.model_arch_args['NN_buffer']
+        self.use_pcgrad = self.model_arch_args['use_pcgrad']
         if self.buffer_in_obs:
             self.emergency_dim = self.emergency_queue_length * self.emergency_feature_dim
         else:
@@ -690,7 +692,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     self.device)
                 self.reward_max = -1000
                 self.reward_min = 1000
-                self.high_level_optim = optim.Adam(self.selector.parameters(), lr=0.001)
+                if self.use_pcgrad:
+                    self.high_level_optim = PCGrad(optim.Adam(self.selector.parameters(), lr=0.001))
+                else:
+                    self.high_level_optim = optim.Adam(self.selector.parameters(), lr=0.001)
             else:
                 raise ValueError(f"Unknown selector type {self.selector_type}")
         elif len(self.selector_type) == 2:

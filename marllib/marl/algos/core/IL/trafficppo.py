@@ -629,6 +629,7 @@ def add_auxiliary_loss(
                                                   fail_hint=policy.model.fail_hint)
                 # progress = tqdm(range(1000))
                 # for _ in progress:
+                pcgrad = model.use_pcgrad
                 mean_loss = torch.tensor(0.0).to(device)
                 for batch in full_batches:
                     discounted_rewards = discount_cumsum(batch[SampleBatch.REWARDS], model.rl_gamma)
@@ -648,12 +649,17 @@ def add_auxiliary_loss(
                         batch_dist: Categorical = Categorical(probs=selector(inputs, invalid_mask=invalid_masks))
                     actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
                     log_probs = batch_dist.log_prob(actions_tensor)
-                    loss = torch.mean(-log_probs * discounted_rewards).to(device)
-
-                    rl_optimizer.zero_grad()
-                    loss.backward()
-                    mean_loss += loss.detach()
-                    rl_optimizer.step()
+                    if pcgrad:
+                        losses = (-log_probs * discounted_rewards).to(device)
+                        rl_optimizer.pc_backward(losses)
+                        mean_loss += losses.mean().detach()
+                        rl_optimizer.step()
+                    else:
+                        loss = torch.mean(-log_probs * discounted_rewards).to(device)
+                        rl_optimizer.zero_grad()
+                        loss.backward()
+                        mean_loss += loss.detach()
+                        rl_optimizer.step()
                     # print gradient of the model
                 mean_reward /= length_of_batches
                 mean_loss /= length_of_batches
