@@ -560,7 +560,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.checkpoint_path = None
         self._is_train = False
         self.assignment_sample_batches = []
-        self.inputs = None
+        self.inputs = self.last_sample_batch = None
         self.eval_interval = 1 if self.local_mode else 5
         self.evaluate_count_down = self.eval_interval
         self.trajectory_generated = 0
@@ -572,6 +572,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.fail_hint = self.model_arch_args['fail_hint']
         self.use_random = self.model_arch_args['use_random']
         self.use_attention = self.model_arch_args['use_attention']
+        self.use_bvn = self.model_arch_args['use_bvn']
         self.train_count = 0
         # self.anti_reward_sync_count = 0
         emergency_path_name = os.path.join(get_project_root(), 'datasets',
@@ -627,13 +628,38 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             out_size=num_outputs,
             initializer=normc_initializer(0.01),
             activation_fn=None).to(self.device)
-        # self.vf_encoder = nn.Sequential(*copy.deepcopy(layers))
-        self.vf_branch = SlimFC(
-            in_size=self.vf_encoder.output_dim,
-            out_size=1,
-            initializer=normc_initializer(0.01),
-            activation_fn=None).to(self.device)
 
+        if self.use_bvn:
+            embed_dim = 3
+            self.extra_critic = nn.Sequential(
+                SlimFC(
+                    in_size=self.status_dim + 1,
+                    out_size=64,
+                    initializer=normc_initializer(0.01),
+                    activation_fn=None),
+                SlimFC(
+                    in_size=64,
+                    out_size=128,
+                    initializer=normc_initializer(0.01),
+                    activation_fn=None),
+                SlimFC(
+                    in_size=128,
+                    out_size=embed_dim,
+                    initializer=normc_initializer(0.01),
+                    activation_fn=None),
+            )
+            self.vf_branch = SlimFC(
+                in_size=self.vf_encoder.output_dim,
+                out_size=embed_dim,
+                initializer=normc_initializer(0.01),
+                activation_fn=None).to(self.device)
+        else:
+            self.extra_critic = None
+            self.vf_branch = SlimFC(
+                in_size=self.vf_encoder.output_dim,
+                out_size=1,
+                initializer=normc_initializer(0.01),
+                activation_fn=None).to(self.device)
         logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
         logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
         # Holds the current "base" output (before logits layer).
@@ -646,6 +672,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.last_predicted_values = None
         self.actors = [self.p_encoder, self.p_branch]
         self.critics = [self.vf_encoder, self.vf_branch]
+        if self.use_bvn:
+            self.critics += [self.extra_critic]
         self.agent_selector_query_dim = 2
         self.selector_input_dim = (self.n_agents * (2 + self.emergency_queue_length * self.agent_selector_query_dim)
                                    + self.agent_selector_query_dim)
@@ -769,6 +797,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
     def forward(self, input_dict: Dict[str, TensorType],
                 state: List[TensorType],
                 seq_lens: TensorType) -> (TensorType, List[TensorType]):
+        self.last_sample_batch = input_dict
         observation = input_dict['obs']['obs']
         if isinstance(observation, dict):
             flat_inputs = {k: v.float() for k, v in observation.items()}
@@ -1463,7 +1492,21 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
 
     @override(TorchModelV2)
     def value_function(self) -> TensorType:
-        return BaseMLPMixin.value_function(self)
+        if self.use_bvn:
+            agents_state = self.inputs['agents_state']
+            obs, _ = agents_state[..., :self.status_dim], agents_state[..., self.status_dim:]
+            try:
+                actions = self.last_sample_batch[SampleBatch.ACTIONS]
+            except KeyError:
+                actions = torch.randint(0, self.num_outputs, (obs.shape[0],), device=self.device)
+                logging.debug("Mock Actions")
+            obs_action = torch.cat([obs, actions.unsqueeze(-1) / (self.num_outputs - 1)], dim=-1)
+            obs_action_embedding = self.extra_critic(obs_action)
+            obs_goal_embedding = self.vf_branch(self.vf_encoder(self.inputs))
+            q_values = -torch.norm(obs_action_embedding - obs_goal_embedding, dim=-1)
+            return q_values
+        else:
+            return BaseMLPMixin.value_function(self)
 
 
 # @njit

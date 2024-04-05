@@ -14,8 +14,8 @@ import numpy as np
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
 from numba import njit
 from ray.rllib.agents.ppo import PPOTorchPolicy, DEFAULT_CONFIG as PPO_CONFIG
-from ray.rllib.agents.ppo.ppo_torch_policy import (kl_and_loss_stats, vf_preds_fetches,
-                                                   ppo_surrogate_loss, compute_gae_for_sample_batch)
+from ray.rllib.agents.ppo.ppo_torch_policy import (kl_and_loss_stats, ppo_surrogate_loss,
+                                                   compute_gae_for_sample_batch, vf_preds_fetches)
 from ray.rllib.evaluation import MultiAgentEpisode
 from ray.rllib.evaluation.postprocessing import discount_cumsum
 from ray.rllib.models.modelv2 import ModelV2
@@ -902,6 +902,7 @@ def increasing_intrinsic_relabeling(model, train_batch, virtual_obs):
 
 def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
     """Attach virtual obs to sample batch for Intrinsic reward calculation."""
+    model.last_sample_batch = input_dict
     extra_dict = vf_preds_fetches(policy, input_dict, state_batches, model, action_dist)
     if hasattr(model, "with_task_allocation") and model.with_task_allocation:
         extra_dict[VIRTUAL_OBS] = model.last_virtual_obs.cpu().numpy()
