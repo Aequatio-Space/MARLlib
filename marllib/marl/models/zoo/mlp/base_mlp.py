@@ -240,7 +240,7 @@ class AgentSelector(nn.Module):
         self.num_agents = num_agents
         self.activation = nn.ReLU
         self.custom_config = model_config['custom_model_config']
-        self.model_arch_args = model_config['custom_model_config']['model_arch_args']
+        self.model_arch_args = self.custom_config['model_arch_args']
         self.use_2d_state = 'conv_layer' in self.model_arch_args
         self.use_attention = 'attention' in self.model_arch_args['core_arch']
         self.emergency_feature_dim = self.custom_config['emergency_feature_dim']
@@ -547,6 +547,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         else:
             self.emergency_dim = self.emergency_feature_dim
         self.use_aim = self.intrinsic_mode == 'aim'
+        self.use_neural_ucb = self.model_arch_args['use_neural_ucb']
         if self.use_aim:
             input_dim = self.full_obs_space['obs']['agents_state'].shape[0]
             self.discriminator = Predictor(input_dim).to(self.device)
@@ -675,7 +676,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         if self.use_bvn:
             self.critics += [self.extra_critic]
         self.agent_selector_query_dim = 2
-        self.selector_input_dim = (self.n_agents * (2 + self.emergency_queue_length * self.agent_selector_query_dim)
+        if self.use_neural_ucb:
+            self.selector_input_dim = self.emergency_queue_length * self.agent_selector_query_dim + 4
+        else:
+            self.selector_input_dim = (self.n_agents * (2 + self.emergency_queue_length * self.agent_selector_query_dim)
                                    + self.agent_selector_query_dim)
         self.actor_initialized_parameters = self.actor_parameters()
         self.aux_selector = None
@@ -715,15 +719,24 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 input_dim = self.full_obs_space['obs']['agents_state'].shape[0]
                 self.selector = Predictor(input_dim).to(self.device)
             elif mode == 'RL':
-                self.selector = AgentSelector(agent_selector_arch, selector_obs_space, self.n_agents).to(self.device)
-                self.aux_selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(
-                    self.device)
+                if self.use_neural_ucb:
+                    if self.rl_use_cnn:
+                        raise NotImplementedError("Neural UCB does not support CNN")
+                    from warp_drive.neural_ucb import NeuralUCB
+                    self.selector = NeuralUCB(agent_selector_arch, self.selector_input_dim, self.n_agents)
+                else:
+                    self.selector = AgentSelector(agent_selector_arch, selector_obs_space, self.n_agents).to(
+                        self.device)
+                    self.aux_selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(self.device)
                 self.reward_max = -1000
                 self.reward_min = 1000
-                if self.use_pcgrad:
-                    self.high_level_optim = PCGrad(optim.Adam(self.selector.parameters(), lr=0.001))
+                if self.use_neural_ucb:
+                    self.high_level_optim = self.selector.optimizer
                 else:
-                    self.high_level_optim = optim.Adam(self.selector.parameters(), lr=0.001)
+                    if self.use_pcgrad:
+                        self.high_level_optim = PCGrad(optim.Adam(self.selector.parameters(), lr=0.001))
+                    else:
+                        self.high_level_optim = optim.Adam(self.selector.parameters(), lr=0.001)
             else:
                 raise ValueError(f"Unknown selector type {self.selector_type}")
         elif len(self.selector_type) == 2:
@@ -1292,33 +1305,44 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         break
                     torch_emergency = torch.from_numpy(emergency).to(self.device)
                     if len(self.selector_type) == 1 and self.selector_type[0] == 'RL':
-                        selector_obs = torch.cat([agents_pos,
-                                                  all_buffer_xy[offset:offset + n_agents]], dim=1).flatten()
-                        final_obs = torch.cat([selector_obs, torch_emergency]).unsqueeze(0)
+                        if self.use_neural_ucb:
+                            final_obs = torch.cat([agents_pos,
+                                                   all_buffer_xy[offset:offset + n_agents],
+                                                   torch_emergency.repeat(4, 1)], dim=1)
+                        else:
+                            selector_obs = torch.cat([agents_pos,
+                                                      all_buffer_xy[offset:offset + n_agents]], dim=1).flatten()
+                            final_obs = torch.cat([selector_obs, torch_emergency]).unsqueeze(0)
                     else:
                         selector_obs = torch.cat([agents_pos, agents_buffer_lens], dim=1).flatten()
                         final_obs = torch.cat([selector_obs, torch_emergency])
                         final_obs = final_obs.unsqueeze(0)
-                    obs_list.append(final_obs.cpu().numpy())
-                    if self.step_count > self.switch_step:
-                        logging.debug("Using RL Agent Selector")
-                        if self.rl_use_cnn:
-                            assert state_info is not None
-                            this_env_state_grid = state_info[i].unsqueeze(0)
-                            state_grid_list.append(this_env_state_grid)
-                            probs = self.selector(final_obs, single_invalid_mask,
-                                                  grid=this_env_state_grid)
-                        else:
-                            probs = self.selector(final_obs, single_invalid_mask)
+                    if self.use_neural_ucb:
+                        obs_list.append(final_obs.unsqueeze(0).cpu().numpy())
                     else:
-                        logging.debug("Using Greedy Agent Selector")
-                        probs = self.aux_selector(final_obs, single_invalid_mask)
-                    logging.debug("Probs: {}".format(probs))
-                    action_dists: Categorical = Categorical(probs=probs)
-                    action = int(action_dists.sample().cpu().numpy())
-                    invalid_mask_list.append(single_invalid_mask.cpu().numpy())
-                    # log_prob = action_dists.log_prob(action)
-                    # action_logp_list.append(log_prob.cpu().numpy())
+                        obs_list.append(final_obs.cpu().numpy())
+                    single_invalid_mask_numpy = single_invalid_mask.cpu().numpy()
+                    if self.use_neural_ucb:
+                        # this_env_state_grid = state_info[i].unsqueeze(0)
+                        action = self.selector.take_action(final_obs, single_invalid_mask_numpy)
+                    else:
+                        if self.step_count > self.switch_step:
+                            logging.debug("Using RL Agent Selector")
+                            if self.rl_use_cnn:
+                                assert state_info is not None
+                                this_env_state_grid = state_info[i].unsqueeze(0)
+                                state_grid_list.append(this_env_state_grid)
+                                probs = self.selector(final_obs, single_invalid_mask,
+                                                      grid=this_env_state_grid)
+                            else:
+                                probs = self.selector(final_obs, single_invalid_mask)
+                        else:
+                            logging.debug("Using Greedy Agent Selector")
+                            probs = self.aux_selector(final_obs, single_invalid_mask)
+                        logging.debug("Probs: {}".format(probs))
+                        action_dists: Categorical = Categorical(probs=probs)
+                        action = int(action_dists.sample().cpu().numpy())
+                    invalid_mask_list.append(single_invalid_mask_numpy)
                     action_list.append(action)
                     # reward = -np.linalg.norm(agents_pos[actions].cpu().numpy() - emergencies, axis=1)
                     agent_id = offset + action

@@ -310,19 +310,20 @@ class TorchPolicy(Policy):
             **kwargs) -> \
             Tuple[TensorType, List[TensorType], Dict[str, TensorType]]:
 
-        with torch.no_grad():
-            # Pass lazy (torch) tensor dict to Model as `input_dict`.
-            input_dict = self._lazy_tensor_dict(input_dict)
-            # Pack internal state inputs into (separate) list.
-            state_batches = [
-                input_dict[k] for k in input_dict.keys() if "state_in" in k[:8]
-            ]
-            # Calculate RNN sequence lengths.
-            seq_lens = np.array([1] * len(input_dict["obs"])) \
-                if state_batches else None
+        # with torch.no_grad():
+        # temporary hack for Neural UCB.
+        # Pass lazy (torch) tensor dict to Model as `input_dict`.
+        input_dict = self._lazy_tensor_dict(input_dict)
+        # Pack internal state inputs into (separate) list.
+        state_batches = [
+            input_dict[k] for k in input_dict.keys() if "state_in" in k[:8]
+        ]
+        # Calculate RNN sequence lengths.
+        seq_lens = np.array([1] * len(input_dict["obs"])) \
+            if state_batches else None
 
-            return self._compute_action_helper(input_dict, state_batches,
-                                               seq_lens, explore, timestep)
+        return self._compute_action_helper(input_dict, state_batches,
+                                           seq_lens, explore, timestep)
 
     @with_lock
     def _compute_action_helper(self, input_dict, state_batches, seq_lens,

@@ -601,9 +601,8 @@ def add_auxiliary_loss(
     lower_agent_batches = train_batch.split_by_episode()
     logging.debug("Switch Step Status: %s", model.step_count > model.switch_step)
     if hasattr(model, "selector_type") and 'RL' in model.selector_type and model.with_task_allocation:
-        parameters_list = [item for item in selector.parameters()]
         mean_reward = torch.tensor(0.0).to(device)
-        if len(parameters_list) > 0 and model.step_count > model.switch_step:
+        if model.step_count > model.switch_step:
             rl_optimizer = model.high_level_optim
             assert 0 <= model.rl_gamma <= 1, "gamma should be in [0, 1]"
             selector.train()
@@ -639,27 +638,33 @@ def add_auxiliary_loss(
                     # do not delete the copy(), discount_cumsum reverse the step for array.
                     discounted_rewards = torch.from_numpy(discounted_rewards.copy()).to(device)
                     mean_reward += torch.mean(discounted_rewards)
-                    inputs = torch.from_numpy(batch[SampleBatch.CUR_OBS]).to(device)
-                    invalid_masks = torch.from_numpy(batch['invalid_mask']).to(device)
-                    if model.rl_use_cnn:
-                        grids = torch.from_numpy(batch[Constants.IMAGE_STATE]).to(device)
-                        batch_dist: Categorical = Categorical(probs=selector(inputs, invalid_mask=invalid_masks,
-                                                                             grid=grids))
+                    if model.use_neural_ucb:
+                        selector.update_batch(batch[SampleBatch.CUR_OBS], batch[SampleBatch.ACTIONS],
+                                              batch[SampleBatch.REWARDS])
+                        selector.train()
+                        mean_loss += model.selector.last_loss
                     else:
-                        batch_dist: Categorical = Categorical(probs=selector(inputs, invalid_mask=invalid_masks))
-                    actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
-                    log_probs = batch_dist.log_prob(actions_tensor)
-                    if pcgrad:
-                        losses = (-log_probs * discounted_rewards).to(device)
-                        rl_optimizer.pc_backward(losses)
-                        mean_loss += losses.mean().detach()
-                        rl_optimizer.step()
-                    else:
-                        loss = torch.mean(-log_probs * discounted_rewards).to(device)
-                        rl_optimizer.zero_grad()
-                        loss.backward()
-                        mean_loss += loss.detach()
-                        rl_optimizer.step()
+                        inputs = torch.from_numpy(batch[SampleBatch.CUR_OBS]).to(device)
+                        invalid_masks = torch.from_numpy(batch['invalid_mask']).to(device)
+                        if model.rl_use_cnn:
+                            grids = torch.from_numpy(batch[Constants.IMAGE_STATE]).to(device)
+                            batch_dist: Categorical = Categorical(probs=selector(inputs, invalid_mask=invalid_masks,
+                                                                                 grid=grids))
+                        else:
+                            batch_dist: Categorical = Categorical(probs=selector(inputs, invalid_mask=invalid_masks))
+                        actions_tensor = torch.from_numpy(batch[SampleBatch.ACTIONS]).to(device)
+                        log_probs = batch_dist.log_prob(actions_tensor)
+                        if pcgrad:
+                            losses = (-log_probs * discounted_rewards).to(device)
+                            rl_optimizer.pc_backward(losses)
+                            mean_loss += losses.mean().detach()
+                            rl_optimizer.step()
+                        else:
+                            loss = torch.mean(-log_probs * discounted_rewards).to(device)
+                            rl_optimizer.zero_grad()
+                            loss.backward()
+                            mean_loss += loss.detach()
+                            rl_optimizer.step()
                     # print gradient of the model
                 mean_reward /= length_of_batches
                 mean_loss /= length_of_batches
@@ -782,13 +787,14 @@ def calculate_assign_rewards_lite(model: ModelV2,
         lower_level_rewards = lower_level_rewards.cpu().numpy()
     allocation_list = assign_obs[..., -2:]
     agents_pos = assign_obs[..., :-2].reshape(-1, n_agents, agents_feature)[..., 0:2]
+    fraction = 1 / n_agents
     # fail_penalty = -EMERGENCY_REWARD_INCREMENT // 10
     if mode == 'greedy':
         for i, (action, emergency) in enumerate(zip(assign_actions, allocation_list)):
             distances = np.linalg.norm(agents_pos[i] - emergency, axis=1)
-            discount_factor = np.zeros(len(distances))
-            discount_factor[np.argsort(distances)] = np.linspace(1 / len(distances), 1, len(distances))
-            emergency_cover_reward = 1 - discount_factor[action]
+            discount_factor = np.zeros(n_agents)
+            discount_factor[np.argsort(distances)] = np.linspace(fraction, 1, n_agents)
+            emergency_cover_reward = 1 + fraction - discount_factor[action]
             assign_rewards[i] = emergency_cover_reward
     else:
         timesteps = assign_agent_batch['timesteps']
@@ -796,8 +802,8 @@ def calculate_assign_rewards_lite(model: ModelV2,
         for i, (current_time, action, emergency) in enumerate(zip(timesteps, assign_actions, allocation_list)):
             # discount_factor = (episode_length - delta) / episode_length
             distances = np.linalg.norm(agents_pos[i] - emergency, axis=1)
-            discount_factor = np.zeros(len(distances))
-            discount_factor[np.argsort(distances)] = np.linspace(1 / len(distances), 1, len(distances))
+            discount_factor = np.zeros(n_agents)
+            discount_factor[np.argsort(distances)] = np.linspace(fraction, 1, n_agents)
             if mode == 'none':
                 emergency_cover_reward = 0
             else:
@@ -808,7 +814,7 @@ def calculate_assign_rewards_lite(model: ModelV2,
                 if model.reward_max - model.reward_min > 0:
                     mean_reward = (mean_reward - model.reward_min) / (model.reward_max - model.reward_min)
                 if mean_reward > 0:
-                    emergency_cover_reward = mean_reward * (1 - discount_factor[action])
+                    emergency_cover_reward = mean_reward * (1 + fraction - discount_factor[action])
                 else:
                     emergency_cover_reward = mean_reward * discount_factor[action]
                 logging.debug(f"mean_reward: {mean_reward}, with_emergency: {emergency_cover_reward}")
