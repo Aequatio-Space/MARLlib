@@ -9,6 +9,7 @@ import random
 import re
 from copy import deepcopy
 from typing import Dict, List, Type, Union, Optional
+
 import gym
 import numpy as np
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
@@ -31,6 +32,10 @@ from torch.distributions import Categorical
 from tqdm import tqdm
 
 from warp_drive.utils.constants import Constants
+
+RAW_ASSIGN_REWARDS = 'assign_rewards'
+
+SURVEILLANCE_REWARDS = 'surveillance_rewards'
 
 ANTI_GOAL_REWARD = 'anti_goal_reward'
 
@@ -626,6 +631,12 @@ def add_auxiliary_loss(
                                                   mode=policy.model.reward_mode,
                                                   emergency_threshold=policy.model.emergency_threshold,
                                                   fail_hint=policy.model.fail_hint)
+                    if model.use_relabeling:
+                        new_batch = relabel_assign_batch(assign_agent_batch, model.relabel_threshold,
+                                                         num_agents, 2)
+                        if len(new_batch) > 0:
+                            full_batches.append(new_batch)
+
                 # progress = tqdm(range(1000))
                 # for _ in progress:
                 pcgrad = model.use_pcgrad
@@ -761,12 +772,73 @@ def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewa
     # logging.debug(f"rewards for assignment agent: {assign_rewards}")
 
 
+def generate_new_points(x, y, distances):
+    """
+    Generate new points around the given (x, y) coordinates with the given distances.
+    x: x array for all points
+    y: y array for all points
+    distances: the distances for each (x,y) pair.
+    """
+    # Number of points to generate, inferred from the length of distances array
+    n = len(distances)
+    # Convert distances list to a numpy array if not already
+    distances = np.array(distances)
+
+    # Generate n random angles
+    angles = np.random.uniform(0, 2 * np.pi, n)
+
+    # Calculate the new points' coordinates
+    x_primes = x + distances * np.cos(angles)
+    y_primes = y + distances * np.sin(angles)
+
+    return np.vstack((x_primes, y_primes)).T
+
+
+def relabel_assign_batch(assign_agent_batch: SampleBatch, relabel_threshold: float,
+                         num_agents: int, emergency_feature_number: int) -> SampleBatch:
+    """
+    relabel an episode of assign agent.
+    assign_agent_batch: the SampleBatch for a assignment agent in an episode.
+    relabel_threshold: any transition that achieved reward below relabel_threshold will receive a hindsight
+    relabeled version.
+    num_agents: number of lower level agents.
+    emergency_feature_number: number of features for emergency in observation of assignment agents.
+    """
+    assert RAW_ASSIGN_REWARDS in assign_agent_batch and SURVEILLANCE_REWARDS in assign_agent_batch
+    relabel_mask = assign_agent_batch[RAW_ASSIGN_REWARDS] <= relabel_threshold
+    if np.any(relabel_mask):
+        new_batch = assign_agent_batch.copy()
+        for key in new_batch.keys():
+            new_batch[key] = new_batch[key][relabel_mask]
+        new_batch.count = len(new_batch[SampleBatch.OBS])
+        observations = new_batch[SampleBatch.OBS]
+        emergency_pos, agents_features = observations[..., -emergency_feature_number:], observations[...,
+                                                                                        :-emergency_feature_number]
+        agents_pos = agents_features.reshape(new_batch.count, num_agents, -1)[..., :2]
+        distances = np.linalg.norm(agents_pos - emergency_pos[:, None, :], axis=-1)
+        # find minimum distance for each agent
+        min_distance = np.min(distances, axis=-1)
+        # select agent_pos using actions
+        actions = new_batch[SampleBatch.ACTIONS]
+        # create a mock agent (x,y) coordinate that has a norm smaller than min_distance in that batch
+        agents_pos[np.arange(new_batch.count), actions] = generate_new_points(emergency_pos[..., 0],
+                                                                              emergency_pos[..., 1],
+                                                                              min_distance)
+        # reassemble the observation (Is this the same pointer?)
+        new_batch[SampleBatch.OBS] = np.concatenate([agents_features, emergency_pos], axis=-1)
+    else:
+        new_batch = SampleBatch()
+    return new_batch
+
+
 def calculate_assign_rewards_lite(model: ModelV2,
                                   assign_agent_batch: SampleBatch, lower_agent_batch: SampleBatch,
                                   emergency_states: np.ndarray, status_dim: int, emergency_feature_dim: int,
                                   n_agents: int, agents_feature: int, emergency_threshold: int,
                                   mode: str = 'mix', fail_hint: bool = False):
     assign_obs, assign_rewards = assign_agent_batch[SampleBatch.OBS], assign_agent_batch[SampleBatch.REWARDS]
+    surveillance_rewards = np.zeros_like(assign_rewards)
+    raw_assign_rewards = np.zeros_like(assign_rewards)
     assign_actions = assign_agent_batch[SampleBatch.ACTIONS]
     logging.debug("assign rewards lite is called")
     if mode == 'mix':
@@ -796,6 +868,8 @@ def calculate_assign_rewards_lite(model: ModelV2,
             discount_factor[np.argsort(distances)] = np.linspace(fraction, 1, n_agents)
             emergency_cover_reward = 1 + fraction - discount_factor[action]
             assign_rewards[i] = emergency_cover_reward
+            surveillance_rewards[i] = 1
+            raw_assign_rewards[i] = emergency_cover_reward
     else:
         timesteps = assign_agent_batch['timesteps']
         rewards_by_agent = lower_level_rewards.reshape(-1, n_agents)
@@ -819,6 +893,10 @@ def calculate_assign_rewards_lite(model: ModelV2,
                     emergency_cover_reward = mean_reward * discount_factor[action]
                 logging.debug(f"mean_reward: {mean_reward}, with_emergency: {emergency_cover_reward}")
             assign_rewards[i] = emergency_cover_reward
+            surveillance_rewards[i] = mean_reward
+            raw_assign_rewards[i] = 1 + fraction - discount_factor[action]
+    assign_agent_batch[SURVEILLANCE_REWARDS] = surveillance_rewards
+    assign_agent_batch[RAW_ASSIGN_REWARDS] = raw_assign_rewards
 
 
 def add_regress_loss_old(

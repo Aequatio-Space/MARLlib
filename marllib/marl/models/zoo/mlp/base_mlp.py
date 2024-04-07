@@ -542,6 +542,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.prioritized_buffer = self.model_arch_args['prioritized_buffer']
         self.NN_buffer = self.model_arch_args['NN_buffer']
         self.use_pcgrad = self.model_arch_args['use_pcgrad']
+        self.use_relabeling = self.model_arch_args['use_relabeling']
+        self.relabel_threshold = self.model_arch_args['relabel_threshold']
         if self.buffer_in_obs:
             self.emergency_dim = self.emergency_queue_length * self.emergency_feature_dim
         else:
