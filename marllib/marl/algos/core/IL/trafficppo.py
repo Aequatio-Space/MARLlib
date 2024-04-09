@@ -9,7 +9,7 @@ import random
 import re
 from copy import deepcopy
 from typing import Dict, List, Type, Union, Optional
-
+from math import prod
 import gym
 import numpy as np
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
@@ -31,6 +31,7 @@ from torch import optim
 from torch.distributions import Categorical
 from tqdm import tqdm
 
+from envs.crowd_sim.utils import get_emergency_labels
 from warp_drive.utils.constants import Constants
 
 RAW_ASSIGN_REWARDS = 'assign_rewards'
@@ -113,7 +114,7 @@ def relabel_for_sample_batch(
     selector_type = policy.model.selector_type
     intrinsic_mode = policy.model.intrinsic_mode
     use_intrinsic = intrinsic_mode != 'none'
-    use_gdan = policy.model.use_gdan
+    use_gdan = policy.model.use_gdan or policy.model.use_gdan_lstm
     use_distance_intrinsic = intrinsic_mode != 'aim' or policy.model.step_count < policy.model.switch_step
     # logging.debug("use_distance_intrinsic: %s", use_distance_intrinsic)
     # logging.debug("step_count: %d, switch_step: %d", policy.model.step_count, policy.model.switch_step)
@@ -194,17 +195,20 @@ def relabel_for_sample_batch(
         if use_gdan:
             raw_rewards = sample_batch[ORIGINAL_REWARDS]
             emergency_handled_mask = raw_rewards >= 0.99
-            matched_obs = virtual_obs[emergency_handled_mask]
-            if matched_obs.shape[0] > 0:
-                emergencies = matched_obs[..., status_dim:status_dim + 2]
-                emergency_x, emergency_y = emergencies[..., 0], emergencies[..., 1]
-                # digitize emergency (x,y) to 4 bins
-                num_bins = 4
-                bins = np.linspace(0, 1, num_bins + 1)
-                emergency_x = np.digitize(emergency_x, bins) - 1
-                emergency_y = np.digitize(emergency_y, bins) - 1
-                labels = emergency_x * num_bins + emergency_y
-                policy.model.goal_storage.putAll(matched_obs, labels)
+            if np.any(emergency_handled_mask):
+                matched_obs = virtual_obs[emergency_handled_mask]
+                vec_dim = policy.model.full_obs_space['obs']['agents_state'].shape[0]
+                grid_dim = policy.model.full_obs_space['obs']['grid'].shape
+                aoi_grids = sample_batch[SampleBatch.OBS][emergency_handled_mask,
+                            vec_dim: vec_dim + prod(grid_dim)].reshape(-1, *grid_dim)
+                list_of_dict = []
+                for i in range(len(aoi_grids)):
+                    list_of_dict.append({
+                        'agents_state': matched_obs[i],
+                        'grid': aoi_grids[i]
+                    })
+                labels = get_emergency_labels(matched_obs, status_dim)
+                policy.model.goal_storage.putAll(list_of_dict, labels)
 
     return label_done_masks_and_calculate_gae_for_sample_batch(policy, sample_batch,
                                                                other_agent_batches, episode)
@@ -714,7 +718,8 @@ def add_auxiliary_loss(
         model.tower_stats['mean_intrinsic_rewards'] = torch.mean(train_batch['intrinsic_rewards'])
     model.train()
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
-    if hasattr(model, 'use_gdan') and model.use_gdan:
+    if model.use_gdan or model.use_gdan_lstm:
+        logging.debug("Training Goal Discriminator")
         # TODO: missing *2 at here
         if len(model.goal_storage) > model.goal_batch_size:
             aux_loss, accuracy = model.train_goal_discriminator()
@@ -722,8 +727,10 @@ def add_auxiliary_loss(
         else:
             aux_loss = torch.tensor(0.0)
             accuracy = torch.tensor(0.0)
+        logging.debug(f"GDAN Loss: {aux_loss.item()}, Accuracy: {accuracy}")
         model.tower_stats['mean_gdan_loss'] = aux_loss
         model.tower_stats['gdan_accuracy'] = accuracy
+        model.tower_stats['buffer_size'] = torch.tensor(len(model.goal_storage), dtype=torch.float32)
     # print the gradient of the model.p_encoder (query, keys, values)
     # for name, param in model.p_encoder.named_parameters():
     #     if param.grad is not None:
@@ -1045,6 +1052,9 @@ def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
                 result = getattr(model.p_encoder, model_item_name)
                 if result is not None:
                     extra_dict[item] = result
+        if model.use_gdan_lstm:
+            extra_dict['hx'] = model.main_att_encoder.last_hx
+            extra_dict['cx'] = model.main_att_encoder.last_cx
     return extra_dict
 
 
@@ -1078,16 +1088,17 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
                 length = len(model.last_weight_matrix)
                 for i in range(length):
                     original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
-            if hasattr(model, 'use_gdan') and model.use_gdan:
+            if model.use_gdan or model.use_gdan_lstm:
                 original_dict['gdan_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_gdan_loss")))
                 original_dict['gdan_accuracy'] = torch.mean(torch.stack(policy.get_tower_stats("gdan_accuracy")))
-            # log gradient mean into original_dict
-            # for name, param in model.p_encoder.named_parameters():
-            #     if param.grad is not None:
-            #         original_dict[f"gradient_{name}"] = param.grad.mean()
-            #     else:
-            #         original_dict[f"gradient_{name}"] = 0
-            break
+                original_dict['gdan_buffer_size'] = torch.mean(torch.stack(policy.get_tower_stats("buffer_size")))
+                # log gradient mean into original_dict
+                for name, param in model.main_att_encoder.named_parameters():
+                    if param.grad is not None:
+                        original_dict[f"gradient_{name}"] = param.grad.mean()
+                    else:
+                        original_dict[f"gradient_{name}"] = 0
+                break
     return original_dict
 
 

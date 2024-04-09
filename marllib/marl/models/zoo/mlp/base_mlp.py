@@ -10,13 +10,11 @@ from typing import Tuple, Union
 
 import numpy as np
 import pandas as pd
+import torch.nn.functional as F
 import wandb
 from gym import spaces
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
 from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
-from .selector import Predictor, AgentSelector, RandomSelector, GreedySelector, \
-    GreedyAgentSelector, RandomAgentSelector
-from warp_drive.pcgrad import PCGrad
 from numba import njit
 from ray.rllib.models.torch.misc import SlimFC, normc_initializer
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
@@ -26,12 +24,15 @@ from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.torch_ops import FLOAT_MIN
 from ray.rllib.utils.typing import Dict, TensorType, List
 from scipy.optimize import linear_sum_assignment, milp, LinearConstraint, Bounds
-from torch.distributions import Categorical
 from torch import optim
-import torch.nn.functional as F
+from torch.distributions import Categorical
 
+from envs.crowd_sim.utils import get_emergency_labels
+from warp_drive.pcgrad import PCGrad
 from warp_drive.utils.common import get_project_root
 from warp_drive.utils.constants import Constants
+from .selector import Predictor, AgentSelector, RandomSelector, GreedySelector, \
+    GreedyAgentSelector, RandomAgentSelector
 
 rendering_queue_feature = 3
 
@@ -137,7 +138,6 @@ def others_target_as_anti_goal(env_agents_pos: np.ndarray):
     anti_goals_reward = np.linalg.norm(flattened_agent_pos[nearest_agent_ids] - flattened_agent_pos, axis=1)
     clipped_reward = np.clip(anti_goals_reward, a_min=0, a_max=0.3)
     return clipped_reward
-
 
 
 @njit
@@ -279,7 +279,6 @@ class BaseMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                               model_config, name)
         nn.Module.__init__(self)
         BaseMLPMixin.__init__(self)
-
         # decide the model arch
         self.inputs = None
         self.custom_config = model_config["custom_model_config"]
@@ -348,7 +347,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.last_weight_matrix = None
         self.action_space = action_space
         self.custom_config = model_config["custom_model_config"]
-        self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
         self.status_dim = self.custom_config["status_dim"]
         self.num_outputs = num_outputs
@@ -388,6 +386,82 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.relabel_threshold = self.model_arch_args['relabel_threshold']
         self.use_gdan = self.model_arch_args['use_gdan']
         self.use_gdan_lstm = self.model_arch_args['use_gdan_lstm']
+        self.reward_mode = self.model_arch_args['reward_mode']
+        self.fail_hint = self.model_arch_args['fail_hint']
+        self.use_random = self.model_arch_args['use_random']
+        self.use_attention = self.model_arch_args['use_attention']
+        self.use_bvn = self.model_arch_args['use_bvn']
+        self.full_obs_space = getattr(obs_space, "original_space", obs_space)
+        # encoder
+        if self.use_gdan or self.use_gdan_lstm:
+            self.feature_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
+            logging.debug(f"Encoder Configuration: {self.feature_encoder}")
+            from .gdan_mlp import GoalStorage, AttentiveEncoder, GoalDiscriminator
+            self.discriminator = GoalDiscriminator(self.feature_encoder.output_dim).to(self.device)
+            self.goal_storage: GoalStorage = GoalStorage()
+            self.main_att_encoder: AttentiveEncoder = AttentiveEncoder(
+                img_feat_dim=self.feature_encoder.output_dim,
+                use_lstm=self.use_gdan_lstm,
+                hidden_dim=self.discriminator.hidden_size * 2
+            ).to(self.device)
+            self.goal_batch_size = 10
+            self.hx, self.cx = None, None
+            # self.full_obs_space = deepcopy(self.full_obs_space)
+            # self.full_obs_space['obs']['agents_state'] = Box(low=-float('inf'), high=float('inf'),
+            #                                                  shape=(self.main_att_encoder.output_dim,))
+        else:
+            if self.separate_encoder:
+                assert self.buffer_in_obs, "buffer must in observation for separate encoder"
+                encoder_arch = self.model_arch_args['emergency_encoder']['custom_model_config'][
+                    'model_arch_args']
+                self.encoder_core_arch = encoder_arch['core_arch'] = self.model_arch_args['encoder_core_arch']
+                self.vf_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
+                    self.device)
+                self.p_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
+                    self.device)
+            else:
+                self.p_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
+                self.vf_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
+            logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
+
+            self.p_branch = SlimFC(
+                in_size=self.p_encoder.output_dim,
+                out_size=num_outputs,
+                initializer=normc_initializer(0.01),
+                activation_fn=None).to(self.device)
+            if self.use_bvn:
+                embed_dim = 3
+                self.extra_critic = nn.Sequential(
+                    SlimFC(
+                        in_size=self.status_dim + 1,
+                        out_size=64,
+                        initializer=normc_initializer(0.01),
+                        activation_fn=None),
+                    SlimFC(
+                        in_size=64,
+                        out_size=128,
+                        initializer=normc_initializer(0.01),
+                        activation_fn=None),
+                    SlimFC(
+                        in_size=128,
+                        out_size=embed_dim,
+                        initializer=normc_initializer(0.01),
+                        activation_fn=None),
+                )
+                self.vf_branch = SlimFC(
+                    in_size=self.vf_encoder.output_dim,
+                    out_size=embed_dim,
+                    initializer=normc_initializer(0.01),
+                    activation_fn=None).to(self.device)
+            else:
+                self.extra_critic = None
+                self.vf_branch = SlimFC(
+                    in_size=self.vf_encoder.output_dim,
+                    out_size=1,
+                    initializer=normc_initializer(0.01),
+                    activation_fn=None).to(self.device)
+
+            logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
         if self.buffer_in_obs:
             self.emergency_dim = self.emergency_queue_length * self.emergency_feature_dim
         else:
@@ -398,13 +472,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             input_dim = self.full_obs_space['obs']['agents_state'].shape[0]
             self.discriminator = Predictor(input_dim).to(self.device)
             self.optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=0.001)
-        if self.use_gdan or self.use_gdan_lstm:
-            from .gdan_mlp import GoalStorage, AttentiveEncoder, GoalDiscriminator
-            self.discriminator = GoalDiscriminator(self.status_dim + self.emergency_feature_dim)
-            self.goal_storage = GoalStorage()
-            self.pre_encoder = AttentiveEncoder().to(self.device)
-            self.goal_batch_size = 10
-            self.hx, self.cx = None, None
 
         self.custom_config['emergency_dim'] = self.emergency_dim
 
@@ -422,11 +489,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.switch_step = -1
         self.step_count = 0
         self.rl_update_interval = max(1, self.num_envs // 10)
-        self.reward_mode = self.model_arch_args['reward_mode']
-        self.fail_hint = self.model_arch_args['fail_hint']
-        self.use_random = self.model_arch_args['use_random']
-        self.use_attention = self.model_arch_args['use_attention']
-        self.use_bvn = self.model_arch_args['use_bvn']
         self.train_count = 0
         # self.anti_reward_sync_count = 0
         emergency_path_name = os.path.join(get_project_root(), 'datasets',
@@ -463,59 +525,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.last_rl_transitions = [[] for _ in range(self.num_envs)]
         self.reset_states()
         self.last_emergency_queue_length = self.last_emergency_mode = self.last_emergency_targets = None
-        # encoder
-        if self.separate_encoder:
-            assert self.buffer_in_obs, "buffer must in observation for separate encoder"
-            encoder_arch = self.model_arch_args['emergency_encoder']['custom_model_config'][
-                'model_arch_args']
-            self.encoder_core_arch = encoder_arch['core_arch'] = self.model_arch_args['encoder_core_arch']
-            self.vf_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
-                self.device)
-            self.p_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
-                self.device)
-        else:
-            self.p_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
-            self.vf_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
 
-        self.p_branch = SlimFC(
-            in_size=self.p_encoder.output_dim,
-            out_size=num_outputs,
-            initializer=normc_initializer(0.01),
-            activation_fn=None).to(self.device)
-
-        if self.use_bvn:
-            embed_dim = 3
-            self.extra_critic = nn.Sequential(
-                SlimFC(
-                    in_size=self.status_dim + 1,
-                    out_size=64,
-                    initializer=normc_initializer(0.01),
-                    activation_fn=None),
-                SlimFC(
-                    in_size=64,
-                    out_size=128,
-                    initializer=normc_initializer(0.01),
-                    activation_fn=None),
-                SlimFC(
-                    in_size=128,
-                    out_size=embed_dim,
-                    initializer=normc_initializer(0.01),
-                    activation_fn=None),
-            )
-            self.vf_branch = SlimFC(
-                in_size=self.vf_encoder.output_dim,
-                out_size=embed_dim,
-                initializer=normc_initializer(0.01),
-                activation_fn=None).to(self.device)
-        else:
-            self.extra_critic = None
-            self.vf_branch = SlimFC(
-                in_size=self.vf_encoder.output_dim,
-                out_size=1,
-                initializer=normc_initializer(0.01),
-                activation_fn=None).to(self.device)
-        logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
-        logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
         # Holds the current "base" output (before logits layer).
         self._features = None
         # Holds the last input, in case value branch is separate.
@@ -524,16 +534,20 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.last_virtual_obs = self.last_buffer_indices = None
         self.last_anti_goal_reward = None
         self.last_predicted_values = None
-        self.actors = [self.p_encoder, self.p_branch]
-        self.critics = [self.vf_encoder, self.vf_branch]
-        if self.use_bvn:
-            self.critics += [self.extra_critic]
+        if self.use_gdan or self.use_gdan_lstm:
+            self.actors = [self.main_att_encoder.p_branch]
+            self.critics = [self.main_att_encoder.vf_branch]
+        else:
+            self.actors = [self.p_encoder, self.p_branch]
+            self.critics = [self.vf_encoder, self.vf_branch]
+            if self.use_bvn:
+                self.critics += [self.extra_critic]
         self.agent_selector_query_dim = 2
         if self.use_neural_ucb:
             self.selector_input_dim = self.emergency_queue_length * self.agent_selector_query_dim + 4
         else:
             self.selector_input_dim = (self.n_agents * (2 + self.emergency_queue_length * self.agent_selector_query_dim)
-                                   + self.agent_selector_query_dim)
+                                       + self.agent_selector_query_dim)
         self.actor_initialized_parameters = self.actor_parameters()
         self.aux_selector = None
         agent_selector_arch: dict = model_config['custom_model_config']['agent_selector_arch']
@@ -560,7 +574,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 selector_custom_configs[item] = getattr(self, item)
             selector_custom_configs['model_arch_args']['core_arch'] = 'attention'
             selector_custom_configs['status_dim'] = (
-                                                                self.selector_input_dim - self.agent_selector_query_dim) // self.n_agents
+                                                            self.selector_input_dim - self.agent_selector_query_dim) // self.n_agents
         selector_custom_configs['emergency_feature_dim'] = self.agent_selector_query_dim
         if len(self.selector_type) == 1:
             mode = self.selector_type[0]
@@ -621,10 +635,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     getattr(self, key).load_state_dict(value)
                 break
         if wandb.run is not None:
-            wandb.watch(models=tuple(self.actors), log='all')
-            wandb.watch(models=tuple(self.critics), log='all')
-            if self.use_gdan:
-                wandb.watch(models=tuple([self.discriminator, self.pre_encoder]), log='all')
+            if self.use_gdan or self.use_gdan_lstm:
+                wandb.watch(models=tuple([self.discriminator, self.main_att_encoder]), log='all')
+            else:
+                wandb.watch(models=tuple(self.actors), log='all')
+                # logging critic seems to cause conflicts.
+                # wandb.watch(models=tuple(self.critics), log='all')
 
     def reset_states_old(self):
         self.last_emergency_selection = torch.zeros(self.n_agents, device=self.device)
@@ -658,10 +674,15 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
 
     def train_goal_discriminator(self):
         batch = self.goal_storage.sample(self.goal_batch_size)
-        batch_state, label = np.array(batch.goal), np.array(batch.label)
-        batch_state = torch.from_numpy(batch_state).float().to(self.device)
-        label = torch.tensor(label).to(self.device)
-        target_preds, _ = self.discriminator(batch_state)
+        if isinstance(batch.goal, dict):
+            batch_state = {k: torch.tensor(v).to(self.device) for k, v in batch.goal.items()}
+            label = torch.tensor(batch.label).to(self.device)
+        else:
+            batch_state = torch.tensor(batch.goal).to(self.device)
+            label = torch.tensor(batch.label).to(self.device)
+
+        features = self.feature_encoder(batch_state)
+        target_preds, _ = self.discriminator(features)
         values, indices = target_preds.max(1)
         accuracy = torch.mean((indices.squeeze() == label).float())
         crossentropy_loss = F.cross_entropy(target_preds, label.long())
@@ -689,7 +710,23 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             # start_time = time.time()
             self.query_and_assign(flat_inputs, input_dict)
             # logging.debug("--- query_and_assign %s seconds ---" % (time.time() - start_time))
-        return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
+        if self.use_gdan or self.use_gdan_lstm:
+            virtual_obs = flat_inputs[Constants.VECTOR_STATE]
+            features = self.feature_encoder(flat_inputs)
+            labels = torch.from_numpy(get_emergency_labels(virtual_obs.cpu().numpy(), self.status_dim)).to(self.device)
+            _, query = self.discriminator(features)
+            if self.use_gdan_lstm:
+                if self._is_train:
+                    all_hx = input_dict['hx']
+                    all_cx = input_dict['cx']
+                    features, _, _ = self.main_att_encoder(features, labels, all_hx, all_cx, query)
+                else:
+                    features, self.hx, self.cx = self.main_att_encoder(features, labels, self.hx, self.cx, query)
+            else:
+                features, _, _ = self.main_att_encoder(features, labels, None, None, query)
+            return self.main_att_encoder.get_logits(features), state
+        else:
+            return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
 
     def one_time_assign(self, flat_inputs, input_dict):
         agent_observations = flat_inputs[Constants.VECTOR_STATE]
@@ -904,8 +941,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         else:
                             outputs = np.array([-1], dtype=np.float32)
                             query_batch = np.full_like(all_obs[0].cpu().numpy(), -1)
-                            allocation_agents = actual_emergency_indices = selected_emergencies = np.array([-1],
-                                                                                                           dtype=np.int32)
+                            allocation_agents = actual_emergency_indices = \
+                                selected_emergencies = np.array([-1], dtype=np.int32)
                         all_obs = construct_final_observation(
                             numpy_observations,
                             query_batch,
@@ -1398,6 +1435,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             obs_goal_embedding = self.vf_branch(self.vf_encoder(self.inputs))
             q_values = -torch.norm(obs_action_embedding - obs_goal_embedding, dim=-1)
             return q_values
+        elif self.use_gdan or self.use_gdan_lstm:
+            return self.main_att_encoder.value_function()
         else:
             return BaseMLPMixin.value_function(self)
 
