@@ -7,7 +7,6 @@ from collections import deque
 from functools import reduce
 from heapq import heappush, heappop
 from typing import Tuple, Union
-from warp_drive.pcgrad import PCGrad
 
 import numpy as np
 import pandas as pd
@@ -15,14 +14,16 @@ import wandb
 from gym import spaces
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
 from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
-from marllib.marl.models.zoo.encoder.attention_encoder import CrowdSimAttention, ScaledDotProductAttention
+from .selector import Predictor, AgentSelector, RandomSelector, GreedySelector, \
+    GreedyAgentSelector, RandomAgentSelector
+from warp_drive.pcgrad import PCGrad
 from numba import njit
 from ray.rllib.models.torch.misc import SlimFC, normc_initializer
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
-from ray.rllib.utils.torch_ops import FLOAT_MIN, FLOAT_MAX
+from ray.rllib.utils.torch_ops import FLOAT_MIN
 from ray.rllib.utils.typing import Dict, TensorType, List
 from scipy.optimize import linear_sum_assignment, milp, LinearConstraint, Bounds
 from torch.distributions import Categorical
@@ -207,180 +208,6 @@ def argmax_to_mask(argmax_indices, num_classes=4, num_coords=2):
     return mask
 
 
-class Predictor(nn.Module):
-    def __init__(self, input_dim=22, hidden_size=64, output_dim=1):
-        super(Predictor, self).__init__()
-        self.activation = nn.ReLU
-        self.fc = nn.Sequential(
-            SlimFC(
-                in_size=input_dim,
-                out_size=hidden_size,
-                initializer=normc_initializer(0.01),
-                activation_fn=self.activation),
-            SlimFC(
-                in_size=hidden_size,
-                out_size=hidden_size,
-                initializer=normc_initializer(0.01),
-                activation_fn=self.activation),
-            SlimFC(
-                in_size=hidden_size,
-                out_size=output_dim,
-                initializer=normc_initializer(0.01),
-                activation_fn=None),
-            # activation_fn=None),
-        )
-
-    def forward(self, x):
-        x = x.view(x.size(0), -1)  # 展平输入
-        return self.fc(x)
-
-
-class AgentSelector(nn.Module):
-    def __init__(self, model_config: dict, obs_space, num_agents):
-        super(AgentSelector, self).__init__()
-        self.num_agents = num_agents
-        self.activation = nn.ReLU
-        self.custom_config = model_config['custom_model_config']
-        self.model_arch_args = self.custom_config['model_arch_args']
-        self.use_2d_state = 'conv_layer' in self.model_arch_args
-        self.use_attention = 'attention' in self.model_arch_args['core_arch']
-        self.emergency_feature_dim = self.custom_config['emergency_feature_dim']
-        self.last_weight_matrix = None
-        if self.use_attention:
-            # does not support 1d state
-            # agent_encoder_arch = {}
-            # agent_encoder_arch['emergency_queue_length'] = self.custom_config['emergency_queue_length']
-            # agent_encoder_arch['agents_state_dim'] = self.custom_config['status_dim']
-            # agent_encoder_arch['num_heads'] = self.model_arch_args['num_heads']
-            # agent_encoder_arch['attention_dim'] = self.model_arch_args['attention_dim'] * self.model_arch_args[
-            #     'num_heads']
-            # agent_encoder_arch['emergency_feature'] = self.emergency_feature_dim
-            # agent_encoder_arch['with_softmax'] = True
-            self.attention = ScaledDotProductAttention(self.model_arch_args['attention_dim'], with_softmax=True)
-            encoder_obs_space = spaces.Dict({
-                "obs": spaces.Dict({
-                    Constants.VECTOR_STATE: spaces.Box(low=-float('inf'), high=float('inf'),
-                                                       shape=(self.custom_config['status_dim'],)),
-                    Constants.IMAGE_STATE: spaces.Box(low=-float('inf'), high=float('inf'),
-                                                      shape=(1, *obs_space['obs'][Constants.IMAGE_STATE].shape[1:])),
-                })
-            })
-        else:
-            encoder_obs_space = obs_space
-        self.encoder = BaseEncoder(model_config, encoder_obs_space)
-        # self.dropout = nn.Dropout(p=0.3)
-        self.query_fc = SlimFC(
-            in_size=self.emergency_feature_dim,
-            out_size=self.encoder.output_dim,
-            initializer=normc_initializer(0.01),
-            activation_fn=None)
-        self.out_branch = SlimFC(
-            in_size=self.encoder.output_dim,
-            out_size=num_agents,
-            initializer=normc_initializer(0.01),
-            activation_fn=None)
-
-    def forward(self, input_obs, invalid_mask=None, grid=None):
-        if self.use_2d_state:
-            if self.use_attention:
-                agents_feature, emergency = (input_obs[..., :-self.emergency_feature_dim],
-                                             input_obs[..., -self.emergency_feature_dim:])
-                logging.debug("Agent State Shape: {}".format(agents_feature.shape))
-                logging.debug("Grid Shape: {}".format(grid.shape))
-                batch_size = agents_feature.shape[0]
-                input_dict = {
-                    "obs": agents_feature.reshape(self.num_agents * batch_size, self.custom_config['status_dim']),
-                    "grid": grid.reshape(self.num_agents * batch_size, 1, *grid.shape[2:])
-                }
-                embedding = self.encoder(input_dict).reshape(batch_size, self.num_agents, -1)
-                query_embedding = self.query_fc(emergency).reshape(batch_size, 1, -1)
-                embedding, weights_matrix = self.attention(query_embedding, embedding, embedding)
-                embedding, weights_matrix = embedding.squeeze(1), weights_matrix.squeeze(1)
-                self.last_weight_matrix = weights_matrix
-            else:
-                input_dict = {
-                    "obs": input_obs,
-                    "grid": grid
-                }
-                embedding = self.encoder(input_dict)
-
-        else:
-            if self.use_attention:
-                agents_feature, emergency = (input_obs[..., :-self.emergency_feature_dim],
-                                             input_obs[..., -self.emergency_feature_dim:])
-                agents_feature = agents_feature.reshape(-1, self.num_agents, self.custom_config['status_dim'])
-                embedding = self.encoder(agents_feature)
-                embedding = self.attention(embedding, emergency)
-            else:
-                embedding = self.encoder(input_obs)
-        raw_output = self.out_branch(embedding)
-        if invalid_mask is not None:
-            raw_output -= invalid_mask * (FLOAT_MAX / 2)
-        action_scores = torch.nn.functional.softmax(raw_output, dim=1)
-        return action_scores
-
-
-class RandomSelector(nn.Module):
-    def __init__(self, num_agents, num_actions):
-        super(RandomSelector, self).__init__()
-        self.num_agents = num_agents
-        self.num_actions = num_actions
-
-    def forward(self, input_obs):
-        return torch.rand((input_obs.shape[0]))
-
-
-class GreedySelector(nn.Module):
-    def __init__(self, num_agents, num_actions):
-        super(GreedySelector, self).__init__()
-        self.num_agents = num_agents
-        self.num_actions = num_actions
-
-    def forward(self, input_obs):
-        agent_positions = input_obs[:, self.num_agents + 2:self.num_agents + 4]
-        target_positions = input_obs[:, (self.num_agents + 4) + 4 * (self.num_agents - 1):]
-        distances = torch.norm(agent_positions - target_positions, dim=1)
-        return distances
-
-
-class GreedyAgentSelector(nn.Module):
-    def __init__(self, input_dim, num_agents):
-        super(GreedyAgentSelector, self).__init__()
-        self.num_agents = num_agents
-        self.input_dim = input_dim
-
-    def forward(self, input_obs, invalid_mask):
-        agent_positions = input_obs[:, :-2].reshape(-1, self.num_agents, 3)[..., :2]
-        target_positions = input_obs[:, -2:].repeat(self.num_agents, 1).reshape(-1, self.num_agents, 2)
-        distances = torch.norm(agent_positions - target_positions, dim=-1)
-        distances += (FLOAT_MAX - 5) * invalid_mask
-        return torch.nn.functional.one_hot(torch.argmin(distances, dim=-1), self.num_agents)
-
-
-class RandomAgentSelector(nn.Module):
-    def __init__(self, input_dim, num_agents):
-        super(RandomAgentSelector, self).__init__()
-        self.num_agents = num_agents
-        self.input_dim = input_dim
-
-    def forward(self, input_obs):
-        return torch.rand((input_obs.shape[0], self.num_agents))
-
-
-class GoalDiscriminator(nn.Module):
-    def __init__(self, input_size, hidden_size=128, num_classes=16):
-        super(GoalDiscriminator, self).__init__()
-        self.pre_embed = nn.Linear(input_size, hidden_size)
-        self.linear1 = nn.Linear(hidden_size, hidden_size)
-        self.linear2 = nn.Linear(hidden_size, num_classes)
-
-    def forward(self, input_features):
-        query = F.relu(self.linear1(input_features))
-        x = self.linear2(query)
-
-        return x, query
-
-
 class BaseMLPMixin:
 
     def __init__(self):
@@ -559,6 +386,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.use_pcgrad = self.model_arch_args['use_pcgrad']
         self.use_relabeling = self.model_arch_args['use_relabeling']
         self.relabel_threshold = self.model_arch_args['relabel_threshold']
+        self.use_gdan = self.model_arch_args['use_gdan']
+        self.use_gdan_lstm = self.model_arch_args['use_gdan_lstm']
         if self.buffer_in_obs:
             self.emergency_dim = self.emergency_queue_length * self.emergency_feature_dim
         else:
@@ -569,6 +398,13 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             input_dim = self.full_obs_space['obs']['agents_state'].shape[0]
             self.discriminator = Predictor(input_dim).to(self.device)
             self.optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=0.001)
+        if self.use_gdan or self.use_gdan_lstm:
+            from .gdan_mlp import GoalStorage, AttentiveEncoder, GoalDiscriminator
+            self.discriminator = GoalDiscriminator(self.status_dim + self.emergency_feature_dim)
+            self.goal_storage = GoalStorage()
+            self.pre_encoder = AttentiveEncoder().to(self.device)
+            self.goal_batch_size = 10
+            self.hx, self.cx = None, None
 
         self.custom_config['emergency_dim'] = self.emergency_dim
 
@@ -786,6 +622,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 break
         if wandb.run is not None:
             wandb.watch(models=tuple(self.actors), log='all')
+            wandb.watch(models=tuple(self.critics), log='all')
+            if self.use_gdan:
+                wandb.watch(models=tuple([self.discriminator, self.pre_encoder]), log='all')
 
     def reset_states_old(self):
         self.last_emergency_selection = torch.zeros(self.n_agents, device=self.device)
@@ -808,12 +647,25 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.emergency_buffer = [PriorityQueue() for _ in range(self.n_agents * self.num_envs)]
         else:
             self.emergency_buffer = [deque() for _ in range(self.n_agents * self.num_envs)]
+        if self.use_gdan_lstm:
+            self.hx, self.cx = None, None
         # same mode, indices, target with "mock" for testing
         # self.mock_emergency_mode = np.zeros((self.n_agents * self.num_envs), dtype=np.bool_)
         # self.mock_emergency_indices = np.full((self.n_agents * self.num_envs), -1, dtype=np.int32)
         # self.mock_emergency_target = np.full((self.n_agents * self.num_envs, 2), -1, dtype=np.float32)
         # self.wait_time = torch.zeros((self.n_agents * self.num_envs), device=self.device, dtype=torch.int32)
         # self.collision_count = torch.zeros((self.n_agents * self.num_envs), device=self.device, dtype=torch.int32)
+
+    def train_goal_discriminator(self):
+        batch = self.goal_storage.sample(self.goal_batch_size)
+        batch_state, label = np.array(batch.goal), np.array(batch.label)
+        batch_state = torch.from_numpy(batch_state).float().to(self.device)
+        label = torch.tensor(label).to(self.device)
+        target_preds, _ = self.discriminator(batch_state)
+        values, indices = target_preds.max(1)
+        accuracy = torch.mean((indices.squeeze() == label).float())
+        crossentropy_loss = F.cross_entropy(target_preds, label.long())
+        return crossentropy_loss, accuracy
 
     def train(self):
         logging.debug("train is called")
