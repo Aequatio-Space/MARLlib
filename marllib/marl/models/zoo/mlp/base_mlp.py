@@ -27,6 +27,7 @@ from ray.rllib.utils.typing import Dict, TensorType, List
 from scipy.optimize import linear_sum_assignment, milp, LinearConstraint, Bounds
 from torch.distributions import Categorical
 from torch import optim
+import torch.nn.functional as F
 
 from warp_drive.utils.common import get_project_root
 from warp_drive.utils.constants import Constants
@@ -364,6 +365,20 @@ class RandomAgentSelector(nn.Module):
 
     def forward(self, input_obs):
         return torch.rand((input_obs.shape[0], self.num_agents))
+
+
+class GoalDiscriminator(nn.Module):
+    def __init__(self, input_size, hidden_size=128, num_classes=16):
+        super(GoalDiscriminator, self).__init__()
+        self.pre_embed = nn.Linear(input_size, hidden_size)
+        self.linear1 = nn.Linear(hidden_size, hidden_size)
+        self.linear2 = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, input_features):
+        query = F.relu(self.linear1(input_features))
+        x = self.linear2(query)
+
+        return x, query
 
 
 class BaseMLPMixin:
@@ -730,8 +745,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     self.selector = AgentSelector(agent_selector_arch, selector_obs_space, self.n_agents).to(
                         self.device)
                     self.aux_selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(self.device)
-                self.reward_max = -1000
-                self.reward_min = 1000
+                self.reward_max = 0.3
+                self.reward_min = -0.4
                 if self.use_neural_ucb:
                     self.high_level_optim = self.selector.optimizer
                 else:

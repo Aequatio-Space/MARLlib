@@ -730,6 +730,7 @@ def train_predictor(batch_size, criterion, dataset, epochs, my_device, optimizer
     return mean_loss
 
 
+
 def get_emergency_state(emergency_dim, lower_agent_batch, num_agents, status_dim, this_emergency_count):
     observation = lower_agent_batch[SampleBatch.OBS]
     observation_dim = status_dim + emergency_dim + 100
@@ -811,7 +812,7 @@ def relabel_assign_batch(assign_agent_batch: SampleBatch, relabel_threshold: flo
         new_batch = assign_agent_batch.copy()
         for key in new_batch.keys():
             new_batch[key] = new_batch[key][relabel_mask]
-        new_batch[SampleBatch.REWARDS] = np.ones_like(new_batch[SampleBatch.REWARDS])
+        new_batch[SampleBatch.REWARDS] = new_batch[SURVEILLANCE_REWARDS]
         new_length = new_batch.count = len(new_batch[SampleBatch.OBS])
         observations = new_batch[SampleBatch.OBS]
         actions = new_batch[SampleBatch.ACTIONS]
