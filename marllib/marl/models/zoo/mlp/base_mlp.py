@@ -225,6 +225,17 @@ class BaseMLPMixin:
     def forward(self, input_dict: Dict[str, TensorType],
                 state: List[TensorType],
                 seq_lens: TensorType) -> (TensorType, List[TensorType]):
+        flat_inputs, inf_mask = self.preprocess_input(input_dict)
+        self.inputs = flat_inputs
+        self._features = self.p_encoder(self.inputs)
+        output = self.p_branch(self._features)
+
+        if self.custom_config["mask_flag"]:
+            output = output + inf_mask
+
+        return output, state
+
+    def preprocess_input(self, input_dict):
         observation = input_dict['obs']['obs']
         inf_mask = None
         if isinstance(observation, dict):
@@ -236,15 +247,7 @@ class BaseMLPMixin:
             if self.custom_config["mask_flag"]:
                 action_mask = input_dict["obs"]["action_mask"]
                 inf_mask = torch.clamp(torch.log(action_mask), min=FLOAT_MIN)
-
-        self.inputs = flat_inputs
-        self._features = self.p_encoder(self.inputs)
-        output = self.p_branch(self._features)
-
-        if self.custom_config["mask_flag"]:
-            output = output + inf_mask
-
-        return output, state
+        return flat_inputs, inf_mask
 
     def value_function(self) -> TensorType:
         assert self._features is not None, "must call forward() first"
@@ -386,82 +389,89 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.relabel_threshold = self.model_arch_args['relabel_threshold']
         self.use_gdan = self.model_arch_args['use_gdan']
         self.use_gdan_lstm = self.model_arch_args['use_gdan_lstm']
+        self.use_gdan_no_loss = self.model_arch_args['use_gdan_no_loss']
         self.reward_mode = self.model_arch_args['reward_mode']
         self.fail_hint = self.model_arch_args['fail_hint']
         self.use_random = self.model_arch_args['use_random']
         self.use_attention = self.model_arch_args['use_attention']
         self.use_bvn = self.model_arch_args['use_bvn']
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
+        if self.separate_encoder:
+            assert self.buffer_in_obs, "buffer must in observation for separate encoder"
+            encoder_arch = self.model_arch_args['emergency_encoder']['custom_model_config'][
+                'model_arch_args']
+            self.encoder_core_arch = encoder_arch['core_arch'] = self.model_arch_args['encoder_core_arch']
+            self.vf_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
+                self.device)
+            self.p_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
+                self.device)
+        else:
+            self.p_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
+            self.vf_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
+        logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
+
         # encoder
-        if self.use_gdan or self.use_gdan_lstm:
-            self.feature_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
-            logging.debug(f"Encoder Configuration: {self.feature_encoder}")
+        if self.use_gdan or self.use_gdan_lstm or self.use_gdan_no_loss:
+            # self.feature_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
+            # logging.debug(f"Encoder Configuration: {self.feature_encoder}")
             from .gdan_mlp import GoalStorage, AttentiveEncoder, GoalDiscriminator
-            self.discriminator = GoalDiscriminator(self.feature_encoder.output_dim).to(self.device)
+            self.discriminator = GoalDiscriminator(self.vf_encoder.output_dim).to(self.device)
             self.goal_storage: GoalStorage = GoalStorage()
-            self.main_att_encoder: AttentiveEncoder = AttentiveEncoder(
-                img_feat_dim=self.feature_encoder.output_dim,
-                use_lstm=self.use_gdan_lstm,
-                hidden_dim=self.discriminator.hidden_size * 2
-            ).to(self.device)
+            if self.use_gdan_lstm:
+                self.main_att_encoder: AttentiveEncoder = AttentiveEncoder(
+                    img_feat_dim=self.feature_encoder.output_dim,
+                    use_lstm=self.use_gdan_lstm,
+                    hidden_dim=self.discriminator.hidden_size * 2
+                ).to(self.device)
             self.goal_batch_size = 10
             self.hx, self.cx = None, None
             # self.full_obs_space = deepcopy(self.full_obs_space)
             # self.full_obs_space['obs']['agents_state'] = Box(low=-float('inf'), high=float('inf'),
             #                                                  shape=(self.main_att_encoder.output_dim,))
-        else:
-            if self.separate_encoder:
-                assert self.buffer_in_obs, "buffer must in observation for separate encoder"
-                encoder_arch = self.model_arch_args['emergency_encoder']['custom_model_config'][
-                    'model_arch_args']
-                self.encoder_core_arch = encoder_arch['core_arch'] = self.model_arch_args['encoder_core_arch']
-                self.vf_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
-                    self.device)
-                self.p_encoder = TripleHeadEncoder(self.custom_config, self.model_arch_args, self.full_obs_space).to(
-                    self.device)
-            else:
-                self.p_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
-                self.vf_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
-            logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
 
-            self.p_branch = SlimFC(
-                in_size=self.p_encoder.output_dim,
-                out_size=num_outputs,
-                initializer=normc_initializer(0.01),
-                activation_fn=None).to(self.device)
-            if self.use_bvn:
-                embed_dim = 3
-                self.extra_critic = nn.Sequential(
-                    SlimFC(
-                        in_size=self.status_dim + 1,
-                        out_size=64,
-                        initializer=normc_initializer(0.01),
-                        activation_fn=None),
-                    SlimFC(
-                        in_size=64,
-                        out_size=128,
-                        initializer=normc_initializer(0.01),
-                        activation_fn=None),
-                    SlimFC(
-                        in_size=128,
-                        out_size=embed_dim,
-                        initializer=normc_initializer(0.01),
-                        activation_fn=None),
-                )
-                self.vf_branch = SlimFC(
-                    in_size=self.vf_encoder.output_dim,
+        self.p_branch = SlimFC(
+            in_size=self.p_encoder.output_dim,
+            out_size=num_outputs,
+            initializer=normc_initializer(0.01),
+            activation_fn=None).to(self.device)
+        if self.use_bvn:
+            embed_dim = 3
+            self.extra_critic = nn.Sequential(
+                SlimFC(
+                    in_size=self.status_dim + 1,
+                    out_size=64,
+                    initializer=normc_initializer(0.01),
+                    activation_fn=None),
+                SlimFC(
+                    in_size=64,
+                    out_size=128,
+                    initializer=normc_initializer(0.01),
+                    activation_fn=None),
+                SlimFC(
+                    in_size=128,
                     out_size=embed_dim,
                     initializer=normc_initializer(0.01),
-                    activation_fn=None).to(self.device)
-            else:
-                self.extra_critic = None
-                self.vf_branch = SlimFC(
-                    in_size=self.vf_encoder.output_dim,
-                    out_size=1,
-                    initializer=normc_initializer(0.01),
-                    activation_fn=None).to(self.device)
+                    activation_fn=None),
+            )
 
+            self.vf_branch = SlimFC(
+                in_size=self.vf_encoder.output_dim,
+                out_size=embed_dim,
+                initializer=normc_initializer(0.01),
+                activation_fn=None).to(self.device)
+        else:
+            self.extra_critic = None
+            if self.use_gdan or self.use_gdan_no_loss:
+                in_size = self.vf_encoder.output_dim + self.discriminator.hidden_size
+            else:
+                in_size = self.vf_encoder.output_dim
+            self.vf_branch = SlimFC(
+                in_size=in_size,
+                out_size=1,
+                initializer=normc_initializer(0.01),
+                activation_fn=None).to(self.device)
             logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
+
         if self.buffer_in_obs:
             self.emergency_dim = self.emergency_queue_length * self.emergency_feature_dim
         else:
@@ -534,14 +544,14 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.last_virtual_obs = self.last_buffer_indices = None
         self.last_anti_goal_reward = None
         self.last_predicted_values = None
-        if self.use_gdan or self.use_gdan_lstm:
-            self.actors = [self.main_att_encoder.p_branch]
-            self.critics = [self.main_att_encoder.vf_branch]
-        else:
-            self.actors = [self.p_encoder, self.p_branch]
-            self.critics = [self.vf_encoder, self.vf_branch]
-            if self.use_bvn:
-                self.critics += [self.extra_critic]
+        # if self.use_gdan or self.use_gdan_lstm:
+        #     self.actors = [self.main_att_encoder.p_branch]
+        #     self.critics = [self.main_att_encoder.vf_branch]
+        # else:
+        self.actors = [self.p_encoder, self.p_branch]
+        self.critics = [self.vf_encoder, self.vf_branch]
+        if self.use_bvn:
+            self.critics += [self.extra_critic]
         self.agent_selector_query_dim = 2
         if self.use_neural_ucb:
             self.selector_input_dim = self.emergency_queue_length * self.agent_selector_query_dim + 4
@@ -635,10 +645,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     getattr(self, key).load_state_dict(value)
                 break
         if wandb.run is not None:
-            if self.use_gdan or self.use_gdan_lstm:
-                wandb.watch(models=tuple([self.discriminator, self.main_att_encoder]), log='all')
-            else:
-                wandb.watch(models=tuple(self.actors), log='all')
+            if self.use_gdan or self.use_gdan_lstm or self.use_gdan_no_loss:
+                wandb.watch(models=tuple([self.discriminator]), log='all')
+            wandb.watch(models=tuple(self.actors), log='all')
                 # logging critic seems to cause conflicts.
                 # wandb.watch(models=tuple(self.critics), log='all')
 
@@ -681,7 +690,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             batch_state = torch.tensor(batch.goal).to(self.device)
             label = torch.tensor(batch.label).to(self.device)
 
-        features = self.feature_encoder(batch_state)
+        features = self.vf_encoder(batch_state)
         target_preds, _ = self.discriminator(features)
         values, indices = target_preds.max(1)
         accuracy = torch.mean((indices.squeeze() == label).float())
@@ -710,23 +719,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             # start_time = time.time()
             self.query_and_assign(flat_inputs, input_dict)
             # logging.debug("--- query_and_assign %s seconds ---" % (time.time() - start_time))
-        if self.use_gdan or self.use_gdan_lstm:
-            virtual_obs = flat_inputs[Constants.VECTOR_STATE]
-            features = self.feature_encoder(flat_inputs)
-            labels = torch.from_numpy(get_emergency_labels(virtual_obs.cpu().numpy(), self.status_dim)).to(self.device)
-            _, query = self.discriminator(features)
-            if self.use_gdan_lstm:
-                if self._is_train:
-                    all_hx = input_dict['hx']
-                    all_cx = input_dict['cx']
-                    features, _, _ = self.main_att_encoder(features, labels, all_hx, all_cx, query)
-                else:
-                    features, self.hx, self.cx = self.main_att_encoder(features, labels, self.hx, self.cx, query)
-            else:
-                features, _, _ = self.main_att_encoder(features, labels, None, None, query)
-            return self.main_att_encoder.get_logits(features), state
-        else:
-            return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
+        return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
 
     def one_time_assign(self, flat_inputs, input_dict):
         agent_observations = flat_inputs[Constants.VECTOR_STATE]
@@ -1435,10 +1428,19 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             obs_goal_embedding = self.vf_branch(self.vf_encoder(self.inputs))
             q_values = -torch.norm(obs_action_embedding - obs_goal_embedding, dim=-1)
             return q_values
-        elif self.use_gdan or self.use_gdan_lstm:
-            return self.main_att_encoder.value_function()
         else:
-            return BaseMLPMixin.value_function(self)
+            assert self._features is not None, "must call forward() first"
+            B = self._features.shape[0]
+            x = self.vf_encoder(self.inputs)
+            if self.use_gdan or self.use_gdan_no_loss:
+                logging.debug(f"Using GDAN, Mock Status: {self.use_gdan_no_loss}")
+                _, goal_embedding = self.discriminator(x)
+                x = torch.cat([x, goal_embedding], dim=1)
+
+            if self.q_flag:
+                return torch.reshape(self.vf_branch(x), [B, -1])
+            else:
+                return torch.reshape(self.vf_branch(x), [-1])
 
 
 # @njit

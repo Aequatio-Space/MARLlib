@@ -34,6 +34,8 @@ from tqdm import tqdm
 from envs.crowd_sim.utils import get_emergency_labels
 from warp_drive.utils.constants import Constants
 
+INTRINSIC_REWARDS = 'intrinsic_rewards'
+
 RAW_ASSIGN_REWARDS = 'assign_rewards'
 
 SURVEILLANCE_REWARDS = 'surveillance_rewards'
@@ -113,6 +115,7 @@ def relabel_for_sample_batch(
 
     selector_type = policy.model.selector_type
     intrinsic_mode = policy.model.intrinsic_mode
+    intrinsic_mode = intrinsic_mode
     use_intrinsic = intrinsic_mode != 'none'
     use_gdan = policy.model.use_gdan or policy.model.use_gdan_lstm
     use_distance_intrinsic = intrinsic_mode != 'aim' or policy.model.step_count < policy.model.switch_step
@@ -136,64 +139,66 @@ def relabel_for_sample_batch(
                                                this_emergency_count)
         agents_position = observation[..., num_agents + 2: num_agents + 4]
         num_envs = policy.model.num_envs
-        if use_intrinsic:
-            batch_size = emergency_states.shape[0]
-            if policy.model.buffer_in_obs:
-                if policy.model.separate_encoder and 'gumbel' in policy.model.encoder_core_arch:
-                    emergency_position = sample_batch['executor_obs'][...,
-                                         status_dim:status_dim + emergency_feature_dim]
-                else:
-                    emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
-                        batch_size, -1, emergency_feature_dim
-                    )
+        batch_size = emergency_states.shape[0]
+        if policy.model.buffer_in_obs:
+            if policy.model.separate_encoder and 'gumbel' in policy.model.encoder_core_arch:
+                emergency_position = sample_batch['executor_obs'][...,
+                                     status_dim:status_dim + emergency_feature_dim]
             else:
-                emergency_position = observation[..., status_dim:status_dim + emergency_dim]
-            if emergency_feature_dim > 2:
-                emergency_position = emergency_position[..., :2]
-            if use_distance_intrinsic:
-                if policy.model.sibling_rivalry:
-                    assert ANTI_GOAL_REWARD in sample_batch, ANTI_GOAL_REWARD + " is not in sample_batch."
-                    anti_goal_distances = sample_batch[ANTI_GOAL_REWARD]
-                else:
-                    anti_goal_distances = None
-                # rearrange emergency according to weight matrix
-                indices = None
-                if policy.model.separate_encoder:
-                    core_arch = policy.model.encoder_core_arch
-                    if 'attention' in core_arch:
-                        if 'gumbel' not in core_arch:
-                            if 'weight_matrix' not in sample_batch:
-                                raise ValueError("weight_matrix is not in sample_batch.")
-                            rearranged_indices = sample_batch['weight_matrix'].argsort()
-                            for i in range(batch_size):
-                                emergency_position[i] = emergency_position[i][rearranged_indices[i]]
-                        else:
-                            indices = sample_batch['buffer_indices'][np.arange(batch_size), sample_batch['selection']]
+                emergency_position = observation[..., status_dim:status_dim + emergency_dim].reshape(
+                    batch_size, -1, emergency_feature_dim
+                )
+        else:
+            emergency_position = observation[..., status_dim:status_dim + emergency_dim]
+        if emergency_feature_dim > 2:
+            emergency_position = emergency_position[..., :2]
+        if use_distance_intrinsic:
+            if policy.model.sibling_rivalry:
+                assert ANTI_GOAL_REWARD in sample_batch, ANTI_GOAL_REWARD + " is not in sample_batch."
+                anti_goal_distances = sample_batch[ANTI_GOAL_REWARD]
+            else:
+                anti_goal_distances = None
+            # rearrange emergency according to weight matrix
+            indices = None
+            if policy.model.separate_encoder:
+                core_arch = policy.model.encoder_core_arch
+                if 'attention' in core_arch:
+                    if 'gumbel' not in core_arch:
+                        if 'weight_matrix' not in sample_batch:
+                            raise ValueError("weight_matrix is not in sample_batch.")
+                        rearranged_indices = sample_batch['weight_matrix'].argsort()
+                        for i in range(batch_size):
+                            emergency_position[i] = emergency_position[i][rearranged_indices[i]]
+                    else:
+                        indices = sample_batch['buffer_indices'][np.arange(batch_size), sample_batch['selection']]
 
-                intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
-                                                emergency_threshold=policy.model.emergency_threshold,
-                                                anti_goal_distances=anti_goal_distances, indices=indices,
-                                                alpha=policy.model.alpha, mode=policy.model.intrinsic_mode)
-            else:
-                discriminator: nn.Module = policy.model.discriminator
-                cur_obs = sample_batch[SampleBatch.CUR_OBS][..., :status_dim + emergency_dim]
-                next_obs = sample_batch[SampleBatch.NEXT_OBS][..., :status_dim + emergency_dim]
-                cur_valid_mask = cur_obs[..., status_dim:status_dim + emergency_dim].sum(axis=-1) != 0
-                next_valid_mask = next_obs[..., status_dim:status_dim + emergency_dim].sum(axis=-1) != 0
-                valid_mask = np.logical_and(cur_valid_mask, next_valid_mask)
-                next_obs_potential = discriminator(torch.from_numpy(next_obs).to(policy.model.device))
-                delta = (policy.model.reward_max - policy.model.reward_min)
-                intrinsic = (next_obs_potential.cpu().numpy() - policy.model.reward_max) / delta
-                intrinsic = intrinsic.ravel() * valid_mask
-            # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
-            sample_batch[ORIGINAL_REWARDS] = deepcopy(sample_batch[SampleBatch.REWARDS])
-            sample_batch['intrinsic_rewards'] = intrinsic
-            if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
-                sample_batch[SampleBatch.REWARDS] += torch.from_numpy(intrinsic)
-            else:
-                sample_batch[SampleBatch.REWARDS] += intrinsic
+            intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states,
+                                            emergency_threshold=policy.model.emergency_threshold,
+                                            anti_goal_distances=anti_goal_distances, indices=indices,
+                                            alpha=policy.model.alpha, mode=intrinsic_mode)
+        else:
+            discriminator: nn.Module = policy.model.discriminator
+            cur_obs = sample_batch[SampleBatch.CUR_OBS][..., :status_dim + emergency_dim]
+            next_obs = sample_batch[SampleBatch.NEXT_OBS][..., :status_dim + emergency_dim]
+            cur_valid_mask = cur_obs[..., status_dim:status_dim + emergency_dim].sum(axis=-1) != 0
+            next_valid_mask = next_obs[..., status_dim:status_dim + emergency_dim].sum(axis=-1) != 0
+            valid_mask = np.logical_and(cur_valid_mask, next_valid_mask)
+            next_obs_potential = discriminator(torch.from_numpy(next_obs).to(policy.model.device))
+            delta = (policy.model.reward_max - policy.model.reward_min)
+            intrinsic = (next_obs_potential.cpu().numpy() - policy.model.reward_max) / delta
+            intrinsic = intrinsic.ravel() * valid_mask
+        # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
+        sample_batch[ORIGINAL_REWARDS] = deepcopy(sample_batch[SampleBatch.REWARDS])
+        sample_batch[INTRINSIC_REWARDS] = intrinsic
+        if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
+            sample_batch[SampleBatch.REWARDS] += torch.from_numpy(intrinsic)
+        else:
+            sample_batch[SampleBatch.REWARDS] += intrinsic
         if use_gdan:
-            raw_rewards = sample_batch[ORIGINAL_REWARDS]
+            if intrinsic_mode == 'none':
+                raw_rewards = sample_batch[SampleBatch.REWARDS]
+            else:
+                raw_rewards = sample_batch[ORIGINAL_REWARDS]
             emergency_handled_mask = raw_rewards >= 0.99
             if np.any(emergency_handled_mask):
                 matched_obs = virtual_obs[emergency_handled_mask]
@@ -256,7 +261,7 @@ def label_done_masks_and_calculate_gae_for_sample_batch(
         separate_batches = []
         last_index = 0
         try:
-            raw_rewards = sample_batch['original_rewards']
+            raw_rewards = sample_batch[ORIGINAL_REWARDS]
         except KeyError:
             raw_rewards = sample_batch[SampleBatch.REWARDS]
         separate_result = get_start_indices_of_segments(emergency_obs)
@@ -434,8 +439,8 @@ def modify_batch_with_intrinsic(agents_position, emergency_position, emergency_s
                                 emergency_threshold=0):
     intrinsic = calculate_intrinsic(agents_position, emergency_position, emergency_states, emergency_threshold)
     # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
-    sample_batch['original_rewards'] = deepcopy(sample_batch[SampleBatch.REWARDS])
-    sample_batch['intrinsic_rewards'] = intrinsic
+    sample_batch[ORIGINAL_REWARDS] = deepcopy(sample_batch[SampleBatch.REWARDS])
+    sample_batch[INTRINSIC_REWARDS] = intrinsic
     if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
         sample_batch[SampleBatch.REWARDS] += torch.from_numpy(intrinsic)
     else:
@@ -712,16 +717,16 @@ def add_auxiliary_loss(
         logging.debug(f"RL Mean Loss: {mean_loss.item()}")
         logging.debug(f"RL Mean Reward: {mean_reward.item()}")
         model.tower_stats['mean_rl_loss'] = mean_loss
-        model.tower_stats['mean_assign_reward'] = mean_reward
+        model.tower_stats['mean_' + RAW_ASSIGN_REWARDS] = mean_reward
 
     if model.with_task_allocation:
-        model.tower_stats['mean_intrinsic_rewards'] = torch.mean(train_batch['intrinsic_rewards'])
+        model.tower_stats['mean_' + INTRINSIC_REWARDS] = torch.mean(train_batch[INTRINSIC_REWARDS])
     model.train()
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
-    if model.use_gdan or model.use_gdan_lstm:
+    if model.use_gdan and (not model.use_gdan_no_loss):
         logging.debug("Training Goal Discriminator")
         # TODO: missing *2 at here
-        if len(model.goal_storage) > model.goal_batch_size:
+        if len(model.goal_storage) > model.goal_batch_size * 2:
             aux_loss, accuracy = model.train_goal_discriminator()
             total_loss += aux_loss
         else:
@@ -898,9 +903,9 @@ def calculate_assign_rewards_lite(model: ModelV2,
     if mode == 'mix':
         lower_level_rewards = lower_agent_batch[SampleBatch.REWARDS]
     elif mode == 'intrinsic':
-        lower_level_rewards = lower_agent_batch['intrinsic_rewards']
+        lower_level_rewards = lower_agent_batch[INTRINSIC_REWARDS]
     elif mode == 'original':
-        lower_level_rewards = lower_agent_batch['original_rewards']
+        lower_level_rewards = lower_agent_batch[ORIGINAL_REWARDS]
     elif mode == 'none' or mode == 'greedy':
         lower_level_rewards = np.zeros_like(assign_actions)
     else:
@@ -1007,12 +1012,12 @@ def add_regress_loss_old(
 
 
 def increasing_intrinsic_relabeling(model, train_batch, virtual_obs):
-    relabel_targets = find_ascending_sequences(train_batch['intrinsic_rewards'])
+    relabel_targets = find_ascending_sequences(train_batch[INTRINSIC_REWARDS])
     num_agents = 4
     predictor_inputs = []
     predictor_labels = []
     mean_relabel_percentage = torch.tensor(0.0)
-    train_batch_device = train_batch['intrinsic_rewards'].device
+    train_batch_device = train_batch[INTRINSIC_REWARDS].device
     for fragment in relabel_targets:
         obs_to_be_relabeled = virtual_obs[fragment]
         agent_position = obs_to_be_relabeled[..., num_agents + 2: num_agents + 4].to(model.device)
@@ -1023,11 +1028,11 @@ def increasing_intrinsic_relabeling(model, train_batch, virtual_obs):
             # relabel needed
             emergency_position = agent_position[-1].repeat(len(emergency_position), 1).to(model.device)
             obs_to_be_relabeled[..., 20:22] = agent_position[-1]
-            train_batch['intrinsic_rewards'][fragment] = calculate_intrinsic(
+            train_batch[INTRINSIC_REWARDS][fragment] = calculate_intrinsic(
                 agent_position, emergency_position, torch.zeros(1, device=model.device),
                 fake=True, emergency_threshold=0).to(torch.float32).to(train_batch_device)
-            train_batch[SampleBatch.REWARDS][fragment] = (train_batch['original_rewards'][fragment] +
-                                                          train_batch['intrinsic_rewards'][fragment])
+            train_batch[SampleBatch.REWARDS][fragment] = (train_batch[ORIGINAL_REWARDS][fragment] +
+                                                          train_batch[INTRINSIC_REWARDS][fragment])
             # additional complete bonus
             train_batch[SampleBatch.REWARDS][fragment[-1]] += len(fragment) * 6 / episode_length
             train_batch[VIRTUAL_OBS][fragment] = obs_to_be_relabeled
@@ -1066,11 +1071,12 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
     original_dict = kl_and_loss_stats(policy, train_batch)
     #  'label_count', 'valid_fragment_length', 'relabel_percentage'
     if policy.model.with_task_allocation:
-        for item in ['regress_loss', 'intrinsic_rewards', 'weight_loss']:
+        for item in ['regress_loss', INTRINSIC_REWARDS, 'weight_loss']:
             original_dict[item] = torch.mean(torch.stack(policy.get_tower_stats("mean_" + item)))
         for model in policy.model_gpu_towers:
             if 'RL' in model.selector_type:
-                original_dict['assign_reward'] = torch.mean(torch.stack(policy.get_tower_stats("mean_assign_reward")))
+                original_dict[RAW_ASSIGN_REWARDS] = torch.mean(
+                    torch.stack(policy.get_tower_stats("mean_" + RAW_ASSIGN_REWARDS)))
                 original_dict['assign_reward_max'] = model.reward_max
                 original_dict['assign_reward_min'] = model.reward_min
                 original_dict['rl_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_rl_loss")))
@@ -1088,17 +1094,17 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
                 length = len(model.last_weight_matrix)
                 for i in range(length):
                     original_dict[f'buffer_weight_{i}'] = model.last_weight_matrix[i]
-            if model.use_gdan or model.use_gdan_lstm:
+            if model.use_gdan and (not model.use_gdan_no_loss):
                 original_dict['gdan_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_gdan_loss")))
                 original_dict['gdan_accuracy'] = torch.mean(torch.stack(policy.get_tower_stats("gdan_accuracy")))
                 original_dict['gdan_buffer_size'] = torch.mean(torch.stack(policy.get_tower_stats("buffer_size")))
                 # log gradient mean into original_dict
-                for name, param in model.main_att_encoder.named_parameters():
-                    if param.grad is not None:
-                        original_dict[f"gradient_{name}"] = param.grad.mean()
-                    else:
-                        original_dict[f"gradient_{name}"] = 0
-                break
+                # for name, param in model.main_att_encoder.named_parameters():
+                #     if param.grad is not None:
+                #         original_dict[f"gradient_{name}"] = param.grad.mean()
+                #     else:
+                #         original_dict[f"gradient_{name}"] = 0
+                # break
     return original_dict
 
 
@@ -1151,8 +1157,8 @@ def after_loss_init(policy: Policy, observation_space: gym.spaces.Space,
                     action_space: gym.spaces.Space, config: TrainerConfigDict) -> None:
     policy.view_requirements[ORIGINAL_REWARDS] = ViewRequirement(
         ORIGINAL_REWARDS, shift=0, used_for_training=True)
-    policy.view_requirements['intrinsic_rewards'] = ViewRequirement(
-        'intrinsic_rewards', shift=0, used_for_training=True)
+    policy.view_requirements[INTRINSIC_REWARDS] = ViewRequirement(
+        INTRINSIC_REWARDS, shift=0, used_for_training=True)
 
 
 TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
