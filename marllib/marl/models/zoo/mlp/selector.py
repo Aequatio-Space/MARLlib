@@ -12,7 +12,7 @@ torch, nn = try_import_torch()
 
 
 class Predictor(nn.Module):
-    def __init__(self, input_dim=22, hidden_size=64, output_dim=1):
+    def __init__(self, input_dim=23, hidden_size=32, output_dim=1):
         super(Predictor, self).__init__()
         self.activation = nn.ReLU
         self.fc = nn.Sequential(
@@ -21,11 +21,11 @@ class Predictor(nn.Module):
                 out_size=hidden_size,
                 initializer=normc_initializer(0.01),
                 activation_fn=self.activation),
-            SlimFC(
-                in_size=hidden_size,
-                out_size=hidden_size,
-                initializer=normc_initializer(0.01),
-                activation_fn=self.activation),
+            # SlimFC(
+            #     in_size=hidden_size,
+            #     out_size=hidden_size,
+            #     initializer=normc_initializer(0.01),
+            #     activation_fn=self.activation),
             SlimFC(
                 in_size=hidden_size,
                 out_size=output_dim,

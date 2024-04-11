@@ -27,7 +27,7 @@ from scipy.optimize import linear_sum_assignment, milp, LinearConstraint, Bounds
 from torch import optim
 from torch.distributions import Categorical
 
-from envs.crowd_sim.utils import get_emergency_labels
+from envs.crowd_sim.utils import generate_quadrant_labels
 from warp_drive.pcgrad import PCGrad
 from warp_drive.utils.common import get_project_root
 from warp_drive.utils.constants import Constants
@@ -390,6 +390,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.use_gdan = self.model_arch_args['use_gdan']
         self.use_gdan_lstm = self.model_arch_args['use_gdan_lstm']
         self.use_gdan_no_loss = self.model_arch_args['use_gdan_no_loss']
+        self.gdan_eta = self.model_arch_args['gdan_eta']
+        self.use_action_label = self.model_arch_args['use_action_label']
         self.reward_mode = self.model_arch_args['reward_mode']
         self.fail_hint = self.model_arch_args['fail_hint']
         self.use_random = self.model_arch_args['use_random']
@@ -415,7 +417,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             # self.feature_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
             # logging.debug(f"Encoder Configuration: {self.feature_encoder}")
             from .gdan_mlp import GoalStorage, AttentiveEncoder, GoalDiscriminator
-            self.discriminator = GoalDiscriminator(self.vf_encoder.output_dim).to(self.device)
+            self.discriminator = GoalDiscriminator(self.vf_encoder.output_dim, num_classes=
+            5 if self.use_action_label else 16).to(self.device)
             self.goal_storage: GoalStorage = GoalStorage()
             if self.use_gdan_lstm:
                 self.main_att_encoder: AttentiveEncoder = AttentiveEncoder(
@@ -428,9 +431,12 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             # self.full_obs_space = deepcopy(self.full_obs_space)
             # self.full_obs_space['obs']['agents_state'] = Box(low=-float('inf'), high=float('inf'),
             #                                                  shape=(self.main_att_encoder.output_dim,))
-
+        if self.use_gdan or self.use_gdan_no_loss:
+            in_size = self.p_encoder.output_dim + self.discriminator.hidden_size
+        else:
+            in_size = self.p_encoder.output_dim
         self.p_branch = SlimFC(
-            in_size=self.p_encoder.output_dim,
+            in_size=in_size,
             out_size=num_outputs,
             initializer=normc_initializer(0.01),
             activation_fn=None).to(self.device)
@@ -461,12 +467,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 activation_fn=None).to(self.device)
         else:
             self.extra_critic = None
-            if self.use_gdan or self.use_gdan_no_loss:
-                in_size = self.vf_encoder.output_dim + self.discriminator.hidden_size
-            else:
-                in_size = self.vf_encoder.output_dim
             self.vf_branch = SlimFC(
-                in_size=in_size,
+                in_size=self.vf_encoder.output_dim,
                 out_size=1,
                 initializer=normc_initializer(0.01),
                 activation_fn=None).to(self.device)
@@ -519,7 +521,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         else:
             self.emergency_buffer = [deque() for _ in range(total_slots)]
         if self.NN_buffer:
-            self.weight_generator = Predictor(self.emergency_feature_dim * 2 + 1).to(self.device)
+            self.weight_generator = Predictor(self.emergency_feature_dim + 2).to(self.device)
+            logging.debug(f"Weight Generator Configuration: {self.weight_generator}")
             self.weight_optimizer = torch.optim.Adam(self.weight_generator.parameters(), lr=0.001)
             self.generator_labels = []
             self.generator_inputs = []
@@ -541,7 +544,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         # Holds the last input, in case value branch is separate.
         self._last_obs = None
         self.q_flag = False
-        self.last_virtual_obs = self.last_buffer_indices = None
+        self.last_virtual_obs = self.last_buffer_indices = self.last_buffer_priority = None
         self.last_anti_goal_reward = None
         self.last_predicted_values = None
         # if self.use_gdan or self.use_gdan_lstm:
@@ -719,7 +722,19 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             # start_time = time.time()
             self.query_and_assign(flat_inputs, input_dict)
             # logging.debug("--- query_and_assign %s seconds ---" % (time.time() - start_time))
-        return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
+        if self.use_gdan or self.use_gdan_no_loss:
+            flat_inputs, inf_mask = self.preprocess_input(input_dict)
+            self.inputs = flat_inputs
+            self._features = self.p_encoder(self.inputs)
+            _, embedding = self.discriminator(self._features)
+            self._features = torch.cat([self._features, embedding], dim=1)
+            output = self.p_branch(self._features)
+
+            if self.custom_config["mask_flag"]:
+                output = output + inf_mask
+            return output, state
+        else:
+            return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
 
     def one_time_assign(self, flat_inputs, input_dict):
         agent_observations = flat_inputs[Constants.VECTOR_STATE]
@@ -1004,13 +1019,17 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     logging.debug(f"Crowdsim Eval Countdown: {self.evaluate_count_down}")
                 self.step_count += self.episode_length * self.num_envs
             self.last_virtual_obs = input_dict['obs']['obs']['agents_state']
-            self.last_buffer_indices = np.full((self.n_agents * self.num_envs, self.emergency_queue_length),
-                                               -1, dtype=np.int32)
-            for ind, buffer in enumerate(self.emergency_buffer):
-                if self.prioritized_buffer:
-                    self.last_buffer_indices[ind, :len(buffer)] = np.array(buffer.tolist())
-                else:
-                    self.last_buffer_indices[ind, :len(buffer)] = np.array(list(buffer))
+            if self.local_mode:
+                self.last_buffer_indices = np.full((self.n_agents * self.num_envs, self.emergency_queue_length),
+                                                   -1, dtype=np.int32)
+                self.last_buffer_priority = np.full((self.n_agents * self.num_envs, self.emergency_queue_length),
+                                                    -1, dtype=np.float32)
+                for ind, buffer in enumerate(self.emergency_buffer):
+                    if self.prioritized_buffer:
+                        self.last_buffer_indices[ind, :len(buffer)] = np.array(buffer.tolist())
+                        self.last_buffer_priority[ind, :len(buffer)] = np.array([item[0] for item in buffer])
+                    else:
+                        self.last_buffer_indices[ind, :len(buffer)] = np.array(list(buffer))
             if self.sibling_rivalry:
                 if not_dummy_batch:
                     # valid_mask = (self.assign_status != -1) & (target_coverage[::self.n_agents] == 0)
@@ -1041,15 +1060,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             mask[no_emergencies_mask, :] = 1
             if self.emergency_feature_dim > 2:
                 emergencies_pos = emergencies_pos[..., :2]
-            difference = emergencies_pos - agents_pos
-            # Compute the signs of the elements in some_array
-            quadrant_x = torch.sign(difference[:, 0]).to(torch.int32)
-            quadrant_y = torch.sign(difference[:, 1]).to(torch.int32)
-            quadrant_labels = torch.zeros(batch_size, dtype=torch.int32)
-            quadrant_labels[(quadrant_x == 1) & (quadrant_y == 1)] = 1
-            quadrant_labels[(quadrant_x == -1) & (quadrant_y == 1)] = 2
-            quadrant_labels[(quadrant_x == -1) & (quadrant_y == -1)] = 3
-            quadrant_labels[(quadrant_x == 1) & (quadrant_y == -1)] = 4
+            quadrant_labels = generate_quadrant_labels(agents_pos, emergencies_pos, batch_size)
             for index, item in enumerate(quadrant_labels):
                 mask[index, Constants.ACTION_VALID_DICT[item.item()]] = 1
             input_dict['obs']['action_mask'] = mask.to(self.device)
@@ -1120,18 +1131,16 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     new_buffer = PriorityQueue()
                     for item in my_buffer.tolist():
                         if item not in covered_emergency:
-                            distance = np.linalg.norm(env_agents_pos[i][j] - emergency_xy[i][item])
-                            aoi = emergency_status[i][item][2]
+                            # aoi = emergency_status[i][item][2]
                             if self.NN_buffer:
-                                new_priority = distance * (1 - aoi / self.emergency_threshold)
-                                # current_emergency_status = np.concatenate(
-                                #     [env_agents_pos[i][j], emergency_status[i][item][:3]])
-                                # input = torch.from_numpy(current_emergency_status).unsqueeze(0).to(self.device)
-                                # new_priority = self.weight_generator(input).item()
-                                # self.generator_labels.append(
-                                #     torch.tensor(distance * (1 - aoi / self.emergency_threshold)))
-                                # self.generator_inputs.append(input.squeeze(0))
+                                # new_priority = distance * (1 - aoi / self.emergency_threshold)
+                                current_emergency_status = np.concatenate(
+                                    [env_agents_pos[i][j],
+                                     emergency_status[i][item][:3]])
+                                input = torch.from_numpy(current_emergency_status).unsqueeze(0).to(self.device)
+                                new_priority = self.weight_generator(input).item()
                             else:
+                                distance = np.linalg.norm(env_agents_pos[i][j] - emergency_xy[i][item])
                                 new_priority = distance
                             new_buffer.push(new_priority, item)
                         # else:
@@ -1253,15 +1262,15 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                             distance = np.linalg.norm(agents_pos[action].cpu().numpy() - emergency)
                             aoi = emergency_status[i][this_index][2]
                             if self.NN_buffer:
-                                new_priority = distance * (1 - aoi / self.emergency_threshold)
+                                # new_priority = distance * (1 - aoi / self.emergency_threshold)
+                                current_emergency_status = torch.cat([
+                                    agents_pos[action],
+                                    torch.from_numpy(emergency_status[i][actual_emergency_indices[k]][:3]).to(
+                                        self.device)
+                                ])
+                                input = current_emergency_status.unsqueeze(0)
+                                new_priority = self.weight_generator(input).item()
                                 current_buffer.push(new_priority, this_index)
-                                # current_emergency_status = np.concatenate(
-                                #     [agents_pos[action].cpu().numpy(), emergency_status[i][actual_emergency_indices[k]][:3]])
-                                # input = torch.from_numpy(current_emergency_status).unsqueeze(0).to(self.device)
-                                # new_priority = self.weight_generator(input).item()
-                                # self.generator_labels.append(
-                                #     torch.tensor(distance * (1 - aoi / self.emergency_threshold)))
-                                # self.generator_inputs.append(input.squeeze(0))
                             else:
                                 current_buffer.push(distance, this_index)
                         else:
@@ -1432,10 +1441,10 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             assert self._features is not None, "must call forward() first"
             B = self._features.shape[0]
             x = self.vf_encoder(self.inputs)
-            if self.use_gdan or self.use_gdan_no_loss:
-                logging.debug(f"Using GDAN, Mock Status: {self.use_gdan_no_loss}")
-                _, goal_embedding = self.discriminator(x)
-                x = torch.cat([x, goal_embedding], dim=1)
+            # if self.use_gdan or self.use_gdan_no_loss:
+            #     logging.debug(f"Using GDAN, Mock Status: {self.use_gdan_no_loss}")
+            #     _, goal_embedding = self.discriminator(x)
+            #     x = torch.cat([x, goal_embedding], dim=1)
 
             if self.q_flag:
                 return torch.reshape(self.vf_branch(x), [B, -1])

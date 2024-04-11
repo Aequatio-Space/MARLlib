@@ -124,6 +124,7 @@ def relabel_for_sample_batch(
     status_dim = policy.model.status_dim
     emergency_dim = policy.model.emergency_dim
     emergency_feature_dim = policy.model.emergency_feature_dim
+    use_action_label = policy.model.use_action_label
     # postprocess of rewards
     num_agents = policy.model.n_agents
     # postprocess extra_batches
@@ -195,16 +196,27 @@ def relabel_for_sample_batch(
         else:
             sample_batch[SampleBatch.REWARDS] += intrinsic
         if use_gdan:
+            vec_dim = policy.model.full_obs_space['obs']['agents_state'].shape[0]
+            grid_dim = policy.model.full_obs_space['obs']['grid'].shape
             if intrinsic_mode == 'none':
                 raw_rewards = sample_batch[SampleBatch.REWARDS]
             else:
                 raw_rewards = sample_batch[ORIGINAL_REWARDS]
-            emergency_handled_mask = raw_rewards >= 0.99
-            if np.any(emergency_handled_mask):
-                matched_obs = virtual_obs[emergency_handled_mask]
-                vec_dim = policy.model.full_obs_space['obs']['agents_state'].shape[0]
-                grid_dim = policy.model.full_obs_space['obs']['grid'].shape
-                aoi_grids = sample_batch[SampleBatch.OBS][emergency_handled_mask,
+            if use_action_label:
+                from envs.crowd_sim.utils import generate_quadrant_labels
+                eps = 0.3
+                emergencies_mask = ~np.all(emergency_position == 0, axis=-1)
+                # randomly flip 0 in emergencies_mask to 1
+                random_values = np.random.rand(*emergencies_mask.shape)
+                # Identify where arr is False AND the random value is less than eps
+                # These are the positions where we'll flip False to True
+                flip_positions = (emergencies_mask == False) & (random_values < eps)
+                # Flip the identified False positions to True
+                emergencies_mask[flip_positions] = True
+                matched_obs = virtual_obs[emergencies_mask]
+                agents_pos = matched_obs[..., num_agents + 2: num_agents + 4]
+                new_emergency_position = emergency_position[emergencies_mask]
+                aoi_grids = sample_batch[SampleBatch.OBS][emergencies_mask,
                             vec_dim: vec_dim + prod(grid_dim)].reshape(-1, *grid_dim)
                 list_of_dict = []
                 for i in range(len(aoi_grids)):
@@ -212,8 +224,46 @@ def relabel_for_sample_batch(
                         'agents_state': matched_obs[i],
                         'grid': aoi_grids[i]
                     })
-                labels = get_emergency_labels(matched_obs, status_dim)
+                labels = generate_quadrant_labels(agents_pos, new_emergency_position,
+                                                  new_emergency_position.shape[0]).cpu().numpy()
                 policy.model.goal_storage.putAll(list_of_dict, labels)
+            else:
+                emergency_handled_mask = raw_rewards >= 0.99
+                if np.any(emergency_handled_mask):
+                    matched_obs = virtual_obs[emergency_handled_mask]
+                    aoi_grids = sample_batch[SampleBatch.OBS][emergency_handled_mask,
+                                vec_dim: vec_dim + prod(grid_dim)].reshape(-1, *grid_dim)
+                    list_of_dict = []
+                    for i in range(len(aoi_grids)):
+                        list_of_dict.append({
+                            'agents_state': matched_obs[i],
+                            'grid': aoi_grids[i]
+                        })
+                    labels = get_emergency_labels(matched_obs, status_dim)
+                    policy.model.goal_storage.putAll(list_of_dict, labels)
+        if policy.model.NN_buffer:
+            # TODO: condition prioritized_buffer should be removed.
+            last_emergency_state = emergency_states[-1]
+            handled_emergencies = last_emergency_state[..., -1] == sample_batch['agent_index'][0]
+            if np.any(handled_emergencies):
+                valid_steps = (emergency_states[:, handled_emergencies, 3] == 0).T
+                valid_emergencies_indices = np.nonzero(handled_emergencies)[0]
+                observation_list = []
+                label_list = []
+                for single_valid_step, index in zip(valid_steps, valid_emergencies_indices):
+                    generator_obs = np.hstack([observation[single_valid_step, num_agents + 2:num_agents + 4],
+                                               emergency_states[single_valid_step, index, :3]])
+                    observation_list.append(generator_obs)
+                    # labels are descending number normalized by episode length, the largest number is np.count_nonzero(single_valid_step)
+                    longest_timestep = np.count_nonzero(single_valid_step)
+                    labels = np.arange(start=longest_timestep, stop=0, step=-1) / episode_length
+                    label_list.append(labels)
+                # concatenate the observation list
+                observation_list = np.vstack(observation_list)
+                label_list = np.concatenate(label_list)
+                policy.model.generator_inputs.append(observation_list)
+                policy.model.generator_labels.append(label_list)
+
 
     return label_done_masks_and_calculate_gae_for_sample_batch(policy, sample_batch,
                                                                other_agent_batches, episode)
@@ -579,6 +629,7 @@ def add_auxiliary_loss(
                 optimizer = optim.Adam(selector.parameters(), lr=learning_rate)
                 dataset = torch.utils.data.TensorDataset(inputs[mask].to(torch.float32), labels[mask].to(torch.float32))
                 mean_loss = train_predictor(batch_size, criterion, dataset, epochs, my_device, optimizer, selector)
+                logging.debug(f"mean loss: {mean_loss}")
     else:
         mean_loss = torch.tensor(0.0)
     model.tower_stats['mean_regress_loss'] = mean_loss
@@ -621,13 +672,15 @@ def add_auxiliary_loss(
         batch_size = 32
         epochs = 1
         criterion = nn.MSELoss()
-        inputs = torch.stack(model.generator_inputs)
-        labels = torch.stack(model.generator_labels)
+        inputs = torch.from_numpy(np.vstack(model.generator_inputs))
+        labels = torch.from_numpy(np.concatenate(model.generator_labels))
         dataset = torch.utils.data.TensorDataset(inputs.to(torch.float32), labels.to(torch.float32))
-        mean_loss = train_predictor(batch_size, criterion, dataset, epochs, my_device, model.weight_optimizer,
-                                    generator)
-        model.generator_inputs = []
-        model.generator_labels = []
+        logging.debug(f"generator inputs shape: {inputs.shape}")
+        mean_loss = train_predictor(batch_size, criterion, dataset, epochs,
+                                    my_device, model.weight_optimizer, generator)
+        logging.debug("mean loss of weight generator: %f", mean_loss)
+        model.generator_inputs.clear()
+        model.generator_labels.clear()
     model.tower_stats['mean_weight_loss'] = mean_loss
     lower_agent_batches = train_batch.split_by_episode()
     logging.debug("Switch Step Status: %s", model.step_count > model.switch_step)
@@ -728,7 +781,7 @@ def add_auxiliary_loss(
         # TODO: missing *2 at here
         if len(model.goal_storage) > model.goal_batch_size * 2:
             aux_loss, accuracy = model.train_goal_discriminator()
-            total_loss += aux_loss
+            total_loss += model.gdan_eta * aux_loss
         else:
             aux_loss = torch.tensor(0.0)
             accuracy = torch.tensor(0.0)
@@ -1048,7 +1101,9 @@ def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
     extra_dict = vf_preds_fetches(policy, input_dict, state_batches, model, action_dist)
     if hasattr(model, "with_task_allocation") and model.with_task_allocation:
         extra_dict[VIRTUAL_OBS] = model.last_virtual_obs.cpu().numpy()
-        extra_dict['buffer_indices'] = model.last_buffer_indices
+        if model.local_mode:
+            extra_dict['buffer_indices'] = model.last_buffer_indices
+            extra_dict['buffer_priority'] = model.last_buffer_priority
         if hasattr(model, "sibling_rivalry") and model.sibling_rivalry:
             extra_dict[ANTI_GOAL_REWARD] = model.last_anti_goal_reward
         for item in ['weight_matrix', 'selection', 'executor_obs']:
