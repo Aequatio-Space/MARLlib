@@ -350,13 +350,14 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.last_weight_matrix = None
         self.action_space = action_space
         self.custom_config = model_config["custom_model_config"]
-        self.n_agents = self.custom_config["num_agents"]
-        self.status_dim = self.custom_config["status_dim"]
+        self.model_arch_args = self.custom_config['model_arch_args']
+        self.n_agents = self.model_arch_args['num_drones']
+        self.status_dim = self.n_agents * 5
         self.num_outputs = num_outputs
         self.emergency_feature_dim = self.custom_config["emergency_feature_dim"]
         self.activation = model_config.get("fcnet_activation")
-        self.model_arch_args = self.custom_config['model_arch_args']
-        self.with_task_allocation = self.model_arch_args['dynamic_zero_shot']
+        self.with_task_allocation = self.model_arch_args['dynamic_zero_shot'] and (
+            not self.model_arch_args['no_task_allocation'])
         if self.model_arch_args['use_action_mask']:
             self.custom_config["mask_flag"] = True
         logging.debug(f"CrowdSimNet model_arch_args: {pprint.pformat(self.model_arch_args)}")
@@ -374,6 +375,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.sibling_rivalry = self.model_arch_args['sibling_rivalry']
         self.alpha = self.model_arch_args['alpha']
         self.gen_interval = self.model_arch_args['gen_interval']
+        self.points_per_gen = self.model_arch_args['points_per_gen']
         self.emergency_threshold = self.model_arch_args['emergency_threshold']
         self.tolerance = self.model_arch_args['tolerance']
         self.dataset_name = self.model_arch_args['dataset']
@@ -510,7 +512,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.emergency_count = len(self.unique_emergencies)
         else:
             self.unique_emergencies = None
-            self.emergency_count = int(((self.episode_length / self.gen_interval) - 1) * (self.n_agents - 1))
+            self.emergency_count = int(((self.episode_length / self.gen_interval) - 1) * self.points_per_gen)
         # self.emergency_label_number = self.emergency_dim // self.emergency_feature_dim + 1
         total_slots = self.n_agents * self.num_envs
         self.emergency_mode = np.zeros(total_slots, dtype=np.bool_)
@@ -592,7 +594,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         if len(self.selector_type) == 1:
             mode = self.selector_type[0]
             if mode == "greedy":
-                self.selector = GreedySelector(self.n_agents, num_outputs)
+                self.selector = GreedySelector(self.n_agents, num_outputs, self.status_dim)
             elif mode == 'random':
                 self.selector = RandomSelector(self.n_agents, num_outputs)
             elif mode == 'NN':
@@ -651,8 +653,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             if self.use_gdan or self.use_gdan_lstm or self.use_gdan_no_loss:
                 wandb.watch(models=tuple([self.discriminator]), log='all')
             wandb.watch(models=tuple(self.actors), log='all')
-                # logging critic seems to cause conflicts.
-                # wandb.watch(models=tuple(self.critics), log='all')
+            # logging critic seems to cause conflicts.
+            # wandb.watch(models=tuple(self.critics), log='all')
 
     def reset_states_old(self):
         self.last_emergency_selection = torch.zeros(self.n_agents, device=self.device)
@@ -729,7 +731,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             _, embedding = self.discriminator(self._features)
             self._features = torch.cat([self._features, embedding], dim=1)
             output = self.p_branch(self._features)
-
             if self.custom_config["mask_flag"]:
                 output = output + inf_mask
             return output, state
@@ -964,7 +965,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                             allocation_agents,
                             stop_index,
                             self.status_dim,
-                            self.emergency_feature_dim
+                            self.emergency_feature_dim,
+                            self.n_agents
                         )
                         all_obs = torch.from_numpy(all_obs).to(self.device)
                 input_dict['obs']['obs']['agents_state'] = all_obs
@@ -1524,7 +1526,9 @@ def construct_query_batch(
                 # query predictor for new emergency target
                 for emergency in valid_emergencies_xy:
                     query_obs = all_obs[i].copy()
-                    query_obs[status_dim:status_dim + emergency_feature_dim] = emergency
+                    agent_obs = all_obs[i][n_agents + 2:n_agents + 4]
+                    distance = np.linalg.norm(agent_obs - emergency)
+                    query_obs[status_dim:status_dim + emergency_feature_dim] = np.hstack((emergency, distance))
                     query_obs_list.extend(query_obs)
                 start_index += num_of_emergency
                 query_index_list.append(start_index)
@@ -1551,7 +1555,29 @@ def construct_final_observation(
         stop_index: np.ndarray,
         status_dim: int,
         emergency_feature_dim: int,
+        num_agents: int
 ):
+    """
+    Construct final observation with new emergency target.
+    Args:
+        all_obs: current observation
+        query_batch: query batch for predictor, which is the virtual observation constructed for inference
+        my_emergency_mode: current emergency mode for all agents
+        my_emergency_target: current emergency target for all agents
+        my_emergency_indices: current emergency indices in original envrionments
+        actual_emergency_indices: actual emergency indices
+        selected_emergencies: selected emergencies
+        predicted_values: predicted values
+        last_round_emergency_mode: last round emergency mode
+        allocation_agent_list: allocation agent list
+        stop_index: stop index
+        status_dim: status: size of vector observation for agent
+        emergency_feature_dim: emergency feature dimension
+        num_agents: number of agents
+
+    Returns:
+        modified all_obs, with emergency points assigned.
+    """
     start_index: int = 0
     use_self_greedy = True if len(selected_emergencies) == 0 else False
     # logging.debug("use existing value: {}".format(use_self_greedy))
@@ -1570,8 +1596,7 @@ def construct_final_observation(
             all_obs[emergency_agent_index] = query_batch[offset]
             my_emergency_mode[emergency_agent_index] = 1
             my_emergency_indices[emergency_agent_index] = actual_emergency_indices[offset]
-            my_emergency_target[emergency_agent_index] = query_batch[offset][status_dim:status_dim +
-                                                                                        emergency_feature_dim]
+            my_emergency_target[emergency_agent_index] = query_batch[offset][status_dim:status_dim + 2]
             # logging.debug allocation information
             # logging.debug(
             #     f"agent {emergency_agent_index} selected Target:"
@@ -1579,13 +1604,19 @@ def construct_final_observation(
             #     f"with metric value {predicted_values[offset]}"
             # )
         start_index = stop
-    for index in last_round_emergency_mode:
-        all_obs[index][status_dim:status_dim + emergency_feature_dim] = my_emergency_target[index]
-        # log allocation information
-        # logging.debug(
-        #     f"agent {index} selected Target:"
-        #     f"({my_emergency_target[index][0]},{my_emergency_target[index][1]}) "
-        # )
+    if last_round_emergency_mode[0] != -1:
+        agents_obs = all_obs[last_round_emergency_mode, num_agents + 2: num_agents + 4]
+        distances = np.linalg.norm(agents_obs - my_emergency_target[last_round_emergency_mode], axis=1)
+        all_obs[last_round_emergency_mode, status_dim:status_dim + emergency_feature_dim] = np.hstack(
+            (my_emergency_target[last_round_emergency_mode], distances[:, np.newaxis])
+        )
+    # for index in last_round_emergency_mode:
+    #     all_obs[index][status_dim:status_dim + emergency_feature_dim] = my_emergency_target[index]
+    # log allocation information
+    # logging.debug(
+    #     f"agent {index} selected Target:"
+    #     f"({my_emergency_target[index][0]},{my_emergency_target[index][1]}) "
+    # )
     return all_obs
 
 

@@ -242,7 +242,6 @@ def relabel_for_sample_batch(
                     labels = get_emergency_labels(matched_obs, status_dim)
                     policy.model.goal_storage.putAll(list_of_dict, labels)
         if policy.model.NN_buffer:
-            # TODO: condition prioritized_buffer should be removed.
             last_emergency_state = emergency_states[-1]
             handled_emergencies = last_emergency_state[..., -1] == sample_batch['agent_index'][0]
             if np.any(handled_emergencies):

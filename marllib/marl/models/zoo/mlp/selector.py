@@ -135,14 +135,15 @@ class RandomSelector(nn.Module):
 
 
 class GreedySelector(nn.Module):
-    def __init__(self, num_agents, num_actions):
+    def __init__(self, num_agents, num_actions, status_dim):
         super(GreedySelector, self).__init__()
         self.num_agents = num_agents
         self.num_actions = num_actions
+        self.status_dim = status_dim
 
     def forward(self, input_obs):
-        agent_positions = input_obs[:, self.num_agents + 2:self.num_agents + 4]
-        target_positions = input_obs[:, (self.num_agents + 4) + 4 * (self.num_agents - 1):]
+        agent_positions = input_obs[:, self.num_agents + 2: self.num_agents + 4]
+        target_positions = input_obs[:, self.status_dim:self.status_dim + 2]
         distances = torch.norm(agent_positions - target_positions, dim=1)
         return distances
 
