@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import ray
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.utils.torch_ops import sequence_mask
@@ -48,7 +49,8 @@ class TrustRegionUpdator:
         self.initialize_critic_loss = initialize_critic_loss
         self.stored_actor_parameters = None
         self.device = get_device()
-        self.train_batch = train_batch.to(self.device)
+
+        self.train_batch = train_batch.to_device(self.device)
 
     @property
     def actor_parameters(self):
@@ -89,7 +91,7 @@ class TrustRegionUpdator:
     @property
     def kl(self):
         _logits, _state = self.model(self.train_batch)
-        _curr_action_dist = self.dist_class(_logits, self.model)
+        _curr_action_dist = self.dist_class(_logits.to(self.device), self.model)
         action_dist_inputs = self.train_batch[SampleBatch.ACTION_DIST_INPUTS]
         _prev_action_dist = self.dist_class(action_dist_inputs, self.model)
 

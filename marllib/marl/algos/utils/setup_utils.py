@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 import re
+import ray
 from ray.rllib.agents.ppo.ppo_torch_policy import KLCoeffMixin
 from ray.rllib.policy.torch_policy import LearningRateSchedule, EntropyCoeffSchedule
 from ray.rllib.utils.framework import try_import_torch
@@ -29,10 +30,13 @@ torch, nn = try_import_torch()
 
 
 def get_device():
-    if torch.cuda.is_available():
-        return f'cuda:{torch.cuda.current_device()}'
-    else:
+    if ray.worker._mode() == ray.worker.LOCAL_MODE:
         return 'cpu'
+    else:
+        if torch.cuda.is_available():
+            return f'cuda:{torch.cuda.current_device()}'
+        else:
+            return 'cpu'
 
 
 def get_agent_num(policy):

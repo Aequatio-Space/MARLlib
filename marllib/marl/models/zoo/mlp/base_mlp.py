@@ -10,11 +10,13 @@ from typing import Tuple, Union
 
 import numpy as np
 import pandas as pd
+import ray
 import torch.nn.functional as F
 import wandb
 from gym import spaces
 from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
 from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
+from marllib.marl.algos.utils.setup_utils import get_device
 from numba import njit
 from ray.rllib.models.torch.misc import SlimFC, normc_initializer
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
@@ -288,23 +290,24 @@ class BaseMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.full_obs_space = getattr(obs_space, "original_space", obs_space)
         self.n_agents = self.custom_config["num_agents"]
         self.activation = model_config.get("fcnet_activation")
+        self.device = get_device()
 
         # encoder
-        self.p_encoder = BaseEncoder(model_config, self.full_obs_space)
-        self.vf_encoder = BaseEncoder(model_config, self.full_obs_space)
+        self.p_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
+        self.vf_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
 
         self.p_branch = SlimFC(
             in_size=self.p_encoder.output_dim,
             out_size=num_outputs,
             initializer=normc_initializer(0.01),
-            activation_fn=None)
+            activation_fn=None).to(self.device)
 
         # self.vf_encoder = nn.Sequential(*copy.deepcopy(layers))
         self.vf_branch = SlimFC(
             in_size=self.vf_encoder.output_dim,
             out_size=1,
             initializer=normc_initializer(0.01),
-            activation_fn=None)
+            activation_fn=None).to(self.device)
         logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
         logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
         # Holds the current "base" output (before logits layer).

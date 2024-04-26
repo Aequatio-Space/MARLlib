@@ -1,6 +1,8 @@
 # MIT License
 import logging
 
+import math
+
 from gym import spaces
 from functools import reduce
 from marllib.marl.algos.utils.centralized_Q import get_dim
@@ -63,7 +65,7 @@ class CentralizedEncoder(nn.Module, MixInputEncoderMixin):
             self.encoder['fc'] = nn.Sequential(*fc_layers)
             cnn_layers, dim2 = self.construct_cnn_layers(image_obs_space)
             self.encoder['cnn'] = nn.Sequential(*cnn_layers)
-            self.output_dim = dim1 + dim2
+            input_dim = dim1 + dim2
         else:
             self.mix_input = False
             if "fc_layer" in self.custom_config["model_arch_args"]:
@@ -72,12 +74,10 @@ class CentralizedEncoder(nn.Module, MixInputEncoderMixin):
                 layers, input_dim = self.construct_cnn_layers(obs_space)
             else:
                 raise ValueError("fc_layer/conv layer not in model arch args")
-
-            if "state" not in obs_space.spaces and "conv_layer" in self.custom_config["model_arch_args"]:
-                self.output_dim = input_dim * self.num_agents  # record
-            else:
-                self.output_dim = input_dim  # record
             self.encoder = nn.Sequential(*layers)
+
+        self.output_dim = input_dim
+
         my_space = self.custom_config['space_obs']
         if self.mix_input:
             self.obs_vec_dim = get_dim(my_space['obs'][Constants.VECTOR_STATE].shape)
@@ -108,7 +108,7 @@ class CentralizedEncoder(nn.Module, MixInputEncoderMixin):
         else:
             # self.state_dim = obs_space["state"].shape
             # self.state_dim_last = obs_space["state"].shape[2] + obs_space["obs"].shape[2]
-            input_dim = obs_space['state'].shape[0] + obs_space['obs'].shape[2]
+            input_dim = obs_space['state'].shape[0] + obs_space['obs'].shape[0]
         i = 0
         for i in range(self.custom_config["model_arch_args"]["conv_layer"]):
             layers.append(
@@ -124,6 +124,7 @@ class CentralizedEncoder(nn.Module, MixInputEncoderMixin):
             pool_f = nn.MaxPool2d(kernel_size=self.custom_config["model_arch_args"]["pool_size_layer_{}".format(i)])
             layers.append(pool_f)
             input_dim = self.custom_config["model_arch_args"]["out_channel_layer_{}".format(i)]
+        layers.append(nn.Flatten())
         linear_input = self.cnn_to_fc_convert(i)
         layers.append(nn.Linear(linear_input,
                                 self.custom_config["model_arch_args"][f"out_channel_layer_{i}"]))
@@ -155,13 +156,16 @@ class CentralizedEncoder(nn.Module, MixInputEncoderMixin):
 
     def forward(self, inputs) -> (TensorType, List[TensorType]):
         if self.mix_input:
-            vector_input = torch.cat((inputs[:, :, :self.obs_vec_dim],
-                                      inputs[:, :, self.obs_dim:self.obs_dim + self.state_vec_dim]), dim=-1)
-            batch_size = reduce(lambda x, y: x * y, *inputs.shape[:2])
+            vector_input = torch.cat((inputs[..., :self.obs_vec_dim],
+                                      inputs[..., self.obs_dim:self.obs_dim + self.state_vec_dim]), dim=-1)
+            if len(inputs.shape) > 2:
+                flatten_batch_size = math.prod(inputs.shape[:2])
+            else:
+                flatten_batch_size = inputs.shape[0]
             image_input = torch.cat(
-                (inputs[:, :, self.obs_vec_dim:self.obs_dim].reshape((batch_size, -1, 10, 10)),
-                 inputs[:, :, self.obs_dim + self.state_vec_dim:].reshape((batch_size, -1, 10, 10))), dim=2)
-            output = torch.cat([self.encoder['fc'](vector_input),
+                (inputs[..., self.obs_vec_dim:self.obs_dim].reshape((flatten_batch_size, -1, 10, 10)),
+                 inputs[..., self.obs_dim + self.state_vec_dim:].reshape((flatten_batch_size, -1, 10, 10))), dim=1)
+            output = torch.cat([self.encoder['fc'](vector_input).reshape(flatten_batch_size, -1),
                                 self.cnn_forward(self.encoder['cnn'], image_input)], dim=-1)
         else:
             # Compute the unmasked logits.

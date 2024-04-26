@@ -32,7 +32,7 @@ from ray.rllib.utils.typing import TensorType
 from marllib.marl.models.zoo.mlp.base_mlp import BaseMLP
 from marllib.marl.models.zoo.encoder.cc_encoder import CentralizedEncoder
 from torch.optim import Adam
-
+from math import prod
 torch, nn = try_import_torch()
 
 
@@ -99,9 +99,15 @@ class CentralizedCriticMLP(BaseMLP):
         print(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
         print(f"Centralized Encoder Configuration: {self.cc_vf_encoder}, {self.cc_vf_branch}")
 
+    def get_allocation_table(self):
+        return None
+
     def central_value_function(self, state, opponent_actions=None) -> TensorType:
         assert self._features is not None, "must call forward() first"
-        B = state.shape[0]
+        if len(state.shape) > 2:
+            B = prod(state.shape[:2])
+        else:
+            B = state.shape[0]
 
         x = self.cc_vf_encoder(state)
 

@@ -3,7 +3,7 @@ import numpy as np
 import sys
 import itertools
 import tree  # pip install dm_tree
-from typing import Dict, Iterator, List, Optional, Set, Union
+from typing import Dict, Iterator, List, Optional, Set, Union, OrderedDict
 
 from ray.util import log_once
 from ray.rllib.utils.annotations import Deprecated, DeveloperAPI, \
@@ -718,6 +718,12 @@ class SampleBatch(dict):
             for k, v in self.items():
                 if isinstance(v, np.ndarray) and v.dtype != np.object:
                     self[k] = torch.from_numpy(v).to(device)
+                elif isinstance(v, torch.Tensor):
+                    self[k] = v.to(device)
+                elif isinstance(v, OrderedDict):
+                    # get result recursively
+                    self[k] = SampleBatch.to_device(v, device, framework)
+
         else:
             raise NotImplementedError
         return self

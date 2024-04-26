@@ -77,7 +77,7 @@ def update_m_advantage(iter_model, iter_train_batch, iter_dist_class, iter_prev_
 class IterTrainBatch(SampleBatch):
     """
     This is an adaptor for heterogeneous updating.
-    At firstly, We add the opponent or collaborator information, which includes [actions, obs, states, .. etc], into
+    At first, We add the opponent or collaborator information, which includes [actions, obs, states, .. etc], into
     train_batch in post-processing method.
 
     When update individual model in heterogeneous, we need the following evaluation:
@@ -119,6 +119,18 @@ class IterTrainBatch(SampleBatch):
         self.is_training = self.main_train_batch.is_training
 
         self.pat = re.compile(r'^state_in_(\d+)')
+
+    def __getitem__(self, item):
+        if self.policy_name in item:
+            return self.main_train_batch[item.replace(self.policy_name + '_', '')]
+        else:
+            return self.main_train_batch[item]
+
+    def __contains__(self, item):
+        if self.policy_name in item:
+            return item.replace(self.policy_name + '_', '') in self.main_train_batch
+        else:
+            return item in self.main_train_batch
 
 def get_each_agent_train(model, policy, dist_class, train_batch):
     all_policies_with_names = list(model.other_policies.items()) + [('self', policy)]

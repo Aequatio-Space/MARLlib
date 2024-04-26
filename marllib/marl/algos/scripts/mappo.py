@@ -110,6 +110,7 @@ def run_mappo(model: Any, exp: Dict, run: Dict, env: Dict,
     arch = exp["model_arch_args"]["core_arch"]
     RUNNING_NAME = '_'.join([algorithm, arch, map_name])
     model_path = restore_model(restore, exp)
+    # tune_callback = exp.get("callbacks", [])
     if run['track']:
         logger = None
     else:
@@ -123,7 +124,8 @@ def run_mappo(model: Any, exp: Dict, run: Dict, env: Dict,
                        config=config,
                        verbose=1,
                        progress_reporter=logger,
-                       callbacks=exp.get("callbacks", []),
-                       local_dir=available_local_dir if exp["local_dir"] == "" else exp["local_dir"])
+                       # callbacks=tune_callback, # may pass ray callback into tune, result in error.
+                       local_dir=available_local_dir if exp["local_dir"] == "" else exp["local_dir"]
+                       )
 
     return results

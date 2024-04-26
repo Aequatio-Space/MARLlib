@@ -29,6 +29,8 @@ from marllib.marl.algos.utils.centralized_Q import get_dim
 from ray.rllib.utils.framework import try_import_torch
 from marllib.marl.algos.utils.mixing_Q import align_batch
 
+from gym import spaces
+
 torch, nn = try_import_torch()
 
 """
@@ -257,7 +259,7 @@ def add_opponent_information_and_critical_vf(policy,
                                              episode=None):
     custom_config = policy.config["model"]["custom_model_config"]
     pytorch = custom_config["framework"] == "torch"
-    obs_dim = get_dim(custom_config["space_obs"]["obs"].shape)
+    obs_dim = get_dim_mix(custom_config["space_obs"]["obs"])
     algorithm = custom_config["algorithm"]
     opp_action_in_cc = custom_config["opp_action_in_cc"]
     global_state_flag = custom_config["global_state_flag"]
@@ -302,8 +304,8 @@ def add_opponent_information_and_critical_vf(policy,
         # Policy hasn't been initialized yet, use zeros.
         o = sample_batch[SampleBatch.CUR_OBS]
         if global_state_flag:
-            sample_batch[STATE] = np.zeros((o.shape[0], get_dim(custom_config["space_obs"]["state"].shape) + get_dim(
-                custom_config["space_obs"]["obs"].shape)),
+            state_dim = get_dim_mix(custom_config["space_obs"]["state"])
+            sample_batch[STATE] = np.zeros((o.shape[0], state_dim + obs_dim),
                                            dtype=sample_batch[SampleBatch.CUR_OBS].dtype)
         else:
             sample_batch[STATE] = np.zeros((o.shape[0], n_agents, obs_dim),
@@ -334,3 +336,13 @@ def add_opponent_information_and_critical_vf(policy,
             sample_batch[SampleBatch.REWARDS], dtype=np.float32)
 
     return sample_batch
+
+
+def get_dim_mix(state_space):
+    if isinstance(state_space, spaces.Dict):
+        # get the shape for values in dict
+        shapes = {k: v.shape for k, v in state_space.spaces.items()}
+        state_dim = sum([np.prod(v) for v in shapes.values()])
+    else:
+        state_dim = get_dim(state_space.shape)
+    return state_dim
