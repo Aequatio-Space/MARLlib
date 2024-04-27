@@ -146,7 +146,7 @@ def run_happo(model: Any, exp: Dict, run: Dict, env: Dict,
                        config=config,
                        verbose=1,
                        progress_reporter=logger,
-                       callbacks=exp.get("callbacks", []),
+                       # callbacks=exp.get("callbacks", []),
                        local_dir=available_local_dir if exp["local_dir"] == "" else exp["local_dir"])
 
     return results

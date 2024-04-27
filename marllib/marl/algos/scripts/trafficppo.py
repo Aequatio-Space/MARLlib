@@ -103,7 +103,6 @@ def run_traffic_ppo(model: Any, exp: Dict, run: Dict, env: Dict,
             "max_seq_len": episode_limit,
             "custom_model_config": back_up_config,
         },
-        # "log_level": "INFO",
     }
     if anneal_lr:
         config["lr_schedule"] = [[0, lr], [stop['timesteps_total'], lr / 100]]
@@ -112,8 +111,8 @@ def run_traffic_ppo(model: Any, exp: Dict, run: Dict, env: Dict,
     config.update(run)
 
     algorithm = exp["algorithm"]
-    map_name = exp["env_args"]["map_name"]
     arch = exp["model_arch_args"]["core_arch"]
+    map_name = exp["env_args"]["map_name"]
     RUNNING_NAME = '_'.join([algorithm, arch, map_name])
     model_path = restore_model(restore, exp)
 

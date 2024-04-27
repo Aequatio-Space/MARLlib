@@ -86,6 +86,7 @@ def run_hatrpo(model: Any, exp: Dict, run: Dict, env: Dict,
     num_sgd_iter = _param["num_sgd_iter"]
     vf_loss_coeff = _param["vf_loss_coeff"]
     entropy_coeff = _param["entropy_coeff"]
+    rollout_fragment_length = _param["rollout_fragment_length"]
     vf_clip_param = _param["vf_clip_param"]
     back_up_config = merge_dicts(exp, env)
     back_up_config.pop("algo_args")  # clean for grid_search
@@ -95,6 +96,7 @@ def run_hatrpo(model: Any, exp: Dict, run: Dict, env: Dict,
         "use_gae": use_gae,
         "lambda": gae_lambda,
         "gamma": gamma,
+        "rollout_fragment_length": rollout_fragment_length,
         "kl_coeff": kl_coeff,
         "vf_loss_coeff": vf_loss_coeff,
         "vf_clip_param": vf_clip_param,

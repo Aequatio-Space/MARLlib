@@ -1215,27 +1215,12 @@ def after_loss_init(policy: Policy, observation_space: gym.spaces.Space,
         INTRINSIC_REWARDS, shift=0, used_for_training=True)
 
 
-TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
-    name="TrafficPPOTorchPolicy",
-    get_default_config=lambda: PPO_CONFIG,
-    postprocess_fn=relabel_for_sample_batch,
-    loss_fn=add_auxiliary_loss,
-    extra_action_out_fn=extra_action_out_fn,
-    stats_fn=kl_and_loss_stats_with_regress,
-    _after_loss_init=after_loss_init,
-)
+
 
 
 def get_policy_class_traffic_ppo(config_):
     if config_["framework"] == "torch":
         return TrafficPPOTorchPolicy
-
-
-TrafficPPOTrainer = WandbPPOTrainer.with_updates(
-    name="TRAFFICPPOTrainer",
-    default_policy=None,
-    get_policy_class=get_policy_class_traffic_ppo,
-)
 
 
 @njit
@@ -1288,3 +1273,20 @@ def get_emergency_start_end(emergency_obs: np.ndarray):
             end_indices.insert(0, separate_results[0] - 1)
             separate_results.insert(0, 0)
     return end_indices, start_indices, separate_results
+
+
+TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
+    name="TrafficPPOTorchPolicy",
+    get_default_config=lambda: PPO_CONFIG,
+    postprocess_fn=relabel_for_sample_batch,
+    loss_fn=add_auxiliary_loss,
+    extra_action_out_fn=extra_action_out_fn,
+    stats_fn=kl_and_loss_stats_with_regress,
+    _after_loss_init=after_loss_init,
+)
+
+TrafficPPOTrainer = WandbPPOTrainer.with_updates(
+    name="TRAFFICPPOTrainer",
+    default_policy=None,
+    get_policy_class=get_policy_class_traffic_ppo,
+)

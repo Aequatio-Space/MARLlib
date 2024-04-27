@@ -34,6 +34,7 @@ def get_device():
         return 'cpu'
     else:
         if torch.cuda.is_available():
+            # print("get_device: Using CUDA")
             return f'cuda:{torch.cuda.current_device()}'
         else:
             return 'cpu'
