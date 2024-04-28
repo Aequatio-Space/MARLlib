@@ -128,6 +128,9 @@ def happo_surrogate_loss(
             grad_clip=iter_policy.config['grad_clip'],
         )
 
+        # underflow prevention for iter_policy.kl_coeff
+        iter_policy.kl_coeff = max(iter_policy.kl_coeff, iter_policy.config['kl_coeff_min'])
+
         m_advantage = update_m_advantage(
             iter_model=iter_model,
             iter_train_batch=iter_train_batch,
