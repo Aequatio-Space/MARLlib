@@ -36,7 +36,7 @@ from .itrpo import run_itrpo
 from .hatrpo import run_hatrpo
 from .matrpo import run_matrpo
 from .trafficppo import run_traffic_ppo
-
+from .outpace import run_outpace
 
 POlICY_REGISTRY = {
     "ia2c": run_ia2c,
@@ -56,7 +56,8 @@ POlICY_REGISTRY = {
     'happo': run_happo,
     'itrpo': run_itrpo,
     'hatrpo': run_hatrpo,
-    'matrpo': run_matrpo
+    'matrpo': run_matrpo,
+    'outpace': run_outpace,
 }
 
 

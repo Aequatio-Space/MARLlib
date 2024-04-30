@@ -34,7 +34,8 @@ from ray.tune.analysis import ExperimentAnalysis
 restore_ignore_params = ['render', 'render_file_name', 'local_mode',
                          'dataset', 'switch_step', 'emergency_threshold', 'gen_interval',
                          'selector_type', 'rl_gamma', 'checkpoint_path', 'sibling_rivalry',
-                         'alpha', 'fail_hint', 'reward_mode', 'dynamic_zero_shot', 'use_random']
+                         'alpha', 'fail_hint', 'reward_mode', 'dynamic_zero_shot', 'use_random',
+                         'points_per_gen', 'no_task_allocation', 'num_drones']
 
 def restore_model(restore: Dict, exp: Dict):
     if restore is not None:
@@ -58,8 +59,8 @@ def restore_model(restore: Dict, exp: Dict):
                     diff = set(check_exp.keys()).difference(checkpoint_arch.keys())
                     print(f"Extra keys are {diff}")
                     for key in checkpoint_arch.keys():
-                        if key in check_exp and checkpoint[key] != check_exp[key]:
-                            print(f"Key {key} has different value: {checkpoint[key]} vs {check_exp[key]}")
+                        if key in check_exp and checkpoint_arch[key] != check_exp[key]:
+                            print(f"Key {key} has different value: {checkpoint_arch[key]} vs {check_exp[key]}")
                     raise ValueError("is not using the params required by the checkpoint model")
         model_path = restore["model_path"]
     else:

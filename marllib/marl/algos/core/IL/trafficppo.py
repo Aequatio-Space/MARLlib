@@ -651,7 +651,7 @@ def add_auxiliary_loss(
             next_obs_potential = discriminator(next_obs[valid_mask])
             target_obs = valid_cur_obs.clone().detach()
             # add gaussian noise with mean=0, variance of 0.02
-            target_pos = valid_cur_obs[:, status_dim:status_dim + emergency_dim]
+            target_pos = valid_cur_obs[:, status_dim:status_dim + 2]
             noise = torch.normal(mean=0, std=0.02, size=target_pos.shape).to(device)
             target_obs[:, num_agents + 2: num_agents + 4] = target_pos + noise
             target_obs_potential = discriminator(target_obs)
