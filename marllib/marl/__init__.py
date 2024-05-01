@@ -77,6 +77,7 @@ def make_env(
         map_name: str,
         force_coop: bool = False,
         abs_path: str = "",
+        mock=True,
         **env_params
 ) -> Tuple[MultiAgentEnv, Dict]:
     """
@@ -150,8 +151,7 @@ def make_env(
         no_log_args['env_params'].pop("logging_config")
     except KeyError:
         logging.debug("No logging config detected, continuing")
-    if 'env_params' in no_log_args:
-        no_log_args['env_params']['mock'] = True
+    no_log_args['env_params']['mock'] = mock 
     logging.debug("full env_config:\n%s", pprint.pformat(env_config))
     if env_config["force_coop"]:
         register_env(env_reg_name, lambda _: COOP_ENV_REGISTRY[env_config["env"]](env_config["env_args"]))
