@@ -19,9 +19,9 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-
 from marllib.marl.algos.wandb_trainers import WandbPPOTrainer
-from ray.rllib.agents.ppo.ppo_torch_policy import PPOTorchPolicy
+
+from ray.rllib.agents.ppo.ppo_torch_policy import PPOTorchPolicy, ppo_surrogate_loss
 from ray.rllib.agents.ppo.ppo import DEFAULT_CONFIG as PPO_CONFIG
 
 # from marllib.marl.algos.core.IL.trafficppo import (relabel_for_sample_batch, sample_batch_with_demonstration,
@@ -31,21 +31,24 @@ from ray.rllib.agents.ppo.ppo import DEFAULT_CONFIG as PPO_CONFIG
 ###########
 
 
+def ppo_surrogate_loss_fix_kl(policy, model, dist_class, train_batch):
+    # underflow prevention for iter_policy.kl_coeff
+    policy.kl_coeff = max(policy.kl_coeff, policy.config['kl_coeff_min'])
+    return ppo_surrogate_loss(policy, model, dist_class, train_batch)
+
+
 IPPOTorchPolicy = PPOTorchPolicy.with_updates(
     name="IPPOTorchPolicy",
     get_default_config=lambda: PPO_CONFIG,
-    # postprocess_fn=sample_batch_with_demonstration,
+    loss_fn=ppo_surrogate_loss_fix_kl,
 )
-
 
 def get_policy_class_ppo(config_):
     if config_["framework"] == "torch":
         return IPPOTorchPolicy
-
 
 IPPOTrainer = WandbPPOTrainer.with_updates(
     name="IPPOTrainer",
     default_policy=None,
     get_policy_class=get_policy_class_ppo,
 )
-

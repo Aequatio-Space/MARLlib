@@ -14,8 +14,7 @@ import ray
 import torch.nn.functional as F
 import wandb
 from gym import spaces
-from marllib.marl.models.zoo.encoder.base_encoder import BaseEncoder
-from marllib.marl.models.zoo.encoder.triple_encoder import TripleHeadEncoder
+from marllib.marl.models.zoo.encoder import BaseEncoder, TripleHeadEncoder, SelfAttentionEncoder, CrowdSimAttention
 from marllib.marl.algos.utils.setup_utils import get_device
 from numba import njit
 from ray.rllib.models.torch.misc import SlimFC, normc_initializer
@@ -35,6 +34,8 @@ from warp_drive.utils.common import get_project_root
 from warp_drive.utils.constants import Constants
 from .selector import Predictor, AgentSelector, RandomSelector, GreedySelector, \
     GreedyAgentSelector, RandomAgentSelector
+
+EPISODE_LENGTH = 120
 
 rendering_queue_feature = 3
 
@@ -334,6 +335,11 @@ class BaseMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         return BaseMLPMixin.value_function(self)
 
 
+def get_emergency_count(episode_length, gen_interval, points_per_gen):
+    emergency_count = int(((episode_length / gen_interval) - 1) * points_per_gen)
+    return emergency_count
+
+
 class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
     def __init__(
             self,
@@ -377,8 +383,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.rl_gamma = self.model_arch_args['rl_gamma']
         self.sibling_rivalry = self.model_arch_args['sibling_rivalry']
         self.alpha = self.model_arch_args['alpha']
-        self.gen_interval = self.model_arch_args['gen_interval']
-        self.points_per_gen = self.model_arch_args['points_per_gen']
+
         self.emergency_threshold = self.model_arch_args['emergency_threshold']
         self.tolerance = self.model_arch_args['tolerance']
         self.dataset_name = self.model_arch_args['dataset']
@@ -502,7 +507,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.eval_interval = 1 if self.local_mode else 5
         self.evaluate_count_down = self.eval_interval
         self.trajectory_generated = 0
-        self.episode_length = 120
+        self.episode_length = EPISODE_LENGTH
         self.switch_step = -1
         self.step_count = 0
         self.rl_update_interval = max(1, self.num_envs // 10)
@@ -515,7 +520,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self.emergency_count = len(self.unique_emergencies)
         else:
             self.unique_emergencies = None
-            self.emergency_count = int(((self.episode_length / self.gen_interval) - 1) * self.points_per_gen)
+            self.emergency_count = get_emergency_count(self.episode_length, self.model_arch_args['gen_interval'],
+                                                       self.model_arch_args['points_per_gen'])
         # self.emergency_label_number = self.emergency_dim // self.emergency_feature_dim + 1
         total_slots = self.n_agents * self.num_envs
         self.emergency_mode = np.zeros(total_slots, dtype=np.bool_)
@@ -650,7 +656,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 executor_weights = state['weights']
                 separate_weights = split_first_level(executor_weights)
                 for key, value in separate_weights.items():
-                    getattr(self, key).load_state_dict(value)
+                    # temporary hack for only loading discriminator
+                    if (not self.use_aim) or key == 'discriminator':
+                        getattr(self, key).load_state_dict(value)
                 break
         if wandb.run is not None:
             if self.use_gdan or self.use_gdan_lstm or self.use_gdan_no_loss:
@@ -1331,7 +1339,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     all_obs[i][self.status_dim:self.status_dim + self.emergency_dim] = buffer_as_obs
                 else:
                     if not self.prioritized_buffer:
-                        head_distance = np.linalg.norm(agent_pos - new_emergency_xy)
+                        head_distance = np.linalg.norm(agent_pos.cpu().numpy() - new_emergency_xy)
                     if self.emergency_feature_dim > 2:
                         new_emergency_xy = np.concatenate([new_emergency_xy, [head_distance]])
                     all_obs[i][self.status_dim:self.status_dim + self.emergency_feature_dim] = \
@@ -1541,6 +1549,112 @@ def construct_query_batch(
     return (np.array(query_obs_list), np.array(actual_emergency_index_list),
             np.array(query_index_list), np.nonzero(last_round_emergency)[0],
             np.array(allocation_agent_list))
+
+
+class CentralizedAttention(TorchModelV2, nn.Module, BaseMLPMixin):
+    """Centralized Attention Structure from
+    Deep Reinforcement Learning Enabled Multi-UAV Scheduling for Disaster Data Collection With Time-Varying Value
+    """
+
+    def __init__(
+            self,
+            obs_space,
+            action_space,
+            num_outputs,
+            model_config,
+            name,
+            **kwargs,
+    ):
+        TorchModelV2.__init__(self, obs_space, action_space, num_outputs,
+                              model_config, name)
+        nn.Module.__init__(self)
+        BaseMLPMixin.__init__(self)
+        # decide the model arch
+        self.inputs = None
+        self.custom_config = model_config["custom_model_config"]
+        self.full_obs_space = getattr(obs_space, "original_space", obs_space)
+        self.n_agents = self.custom_config["num_agents"]
+        self.activation = model_config.get("fcnet_activation")
+        self.episode_length = EPISODE_LENGTH
+        self.model_arch_args = self.custom_config['model_arch_args']
+        self.emergency_count = get_emergency_count(self.episode_length, self.model_arch_args['gen_interval'],
+                                                   self.model_arch_args['points_per_gen'])
+        self.device = get_device()
+
+        # encoder
+        self.model_arch_args.update(
+            {
+                'keys_input_features': self.full_obs_space['obs']['agents_state'].shape[0]
+            }
+        )
+        self.emergency_feature_number = self.model_arch_args['input_dim']
+        self.state_encoder = SelfAttentionEncoder(self.model_arch_args).to(self.device)
+        self.p_encoder = CrowdSimAttention(self.model_arch_args).to(self.device)
+        self.vf_encoder = CrowdSimAttention(self.model_arch_args).to(self.device)
+
+        self.p_branch = SlimFC(
+            in_size=self.p_encoder.output_dim,
+            out_size=num_outputs,
+            initializer=normc_initializer(0.01),
+            activation_fn=None).to(self.device)
+
+        # self.vf_encoder = nn.Sequential(*copy.deepcopy(layers))
+        self.vf_branch = SlimFC(
+            in_size=self.vf_encoder.output_dim,
+            out_size=1,
+            initializer=normc_initializer(0.01),
+            activation_fn=None).to(self.device)
+        logging.debug(f"Encoder Configuration: {self.p_encoder}, {self.vf_encoder}")
+        logging.debug(f"Branch Configuration: {self.p_branch}, {self.vf_branch}")
+        # Holds the current "base" output (before logits layer).
+        self._features = None
+        # Holds the last input, in case value branch is separate.
+        self._last_obs = None
+
+        self.q_flag = False
+
+        self.actors = [self.p_encoder, self.p_branch]
+        self.critics = [self.vf_encoder, self.vf_branch]
+        self.actor_initialized_parameters = self.actor_parameters()
+        if wandb.run is not None:
+            wandb.watch(models=tuple(self.actors + [self.state_encoder]), log='all')
+
+    @override(TorchModelV2)
+    def forward(self, input_dict: Dict[str, TensorType],
+                state: List[TensorType],
+                seq_lens: TensorType) -> (TensorType, List[TensorType]):
+        batch_size = input_dict['obs']['obs']['agents_state'].shape[0]
+        # Extract Emergency States from the middle. State distribution includes agent status, emergency and timestep.
+        emergency_input = input_dict['obs']['state']['agents_state'][..., self.n_agents * (self.n_agents + 4):-1]
+        emergency_input = emergency_input.reshape(batch_size, -1, self.emergency_feature_number)
+        emergency_embedding = self.state_encoder(emergency_input)
+        invalid_mask = emergency_input[..., -2] == -1
+        emergency_number = invalid_mask.shape[1]
+        # for i in range(invalid_mask.shape[0]):
+        #     if torch.all(invalid_mask[i]):
+        #         invalid_mask[i][torch.randint(high=emergency_number, size=(2,))] = False
+        # logging.debug(invalid_mask)
+        attention_encoder_input = {
+            'emergency': emergency_embedding,
+            'agents_state': input_dict['obs']['obs']['agents_state'],
+            # 'mask': invalid_mask
+        }
+        # note the second last dim for emergency state is valid indicator
+        self.inputs = attention_encoder_input
+        self._features, _ = self.p_encoder(self.inputs)
+        output = self.p_branch(self._features)
+        return output, state
+
+    @override(TorchModelV2)
+    def value_function(self) -> TensorType:
+        assert self._features is not None, "must call forward() first"
+        B = self._features.shape[0]
+        x, _ = self.vf_encoder(self.inputs)
+        value = self.vf_branch(x)
+        if self.q_flag:
+            return torch.reshape(value, [B, -1])
+        else:
+            return torch.reshape(value, [-1])
 
 
 # @njit

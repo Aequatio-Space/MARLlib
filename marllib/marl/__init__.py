@@ -28,8 +28,7 @@ from marllib.marl.algos.scripts import POlICY_REGISTRY
 from marllib.envs.base_env import ENV_REGISTRY
 from marllib.envs.global_reward_env import COOP_ENV_REGISTRY
 from marllib.marl.models import BaseRNN, BaseMLP, CentralizedCriticRNN, CentralizedCriticMLP, ValueDecompRNN, \
-    ValueDecompMLP, JointQMLP, JointQRNN, DDPGSeriesRNN, DDPGSeriesMLP, CrowdSimMLP
-from envs.crowd_sim.crowd_sim import RLlibCUDACrowdSim
+    ValueDecompMLP, JointQMLP, JointQRNN, DDPGSeriesRNN, DDPGSeriesMLP, CrowdSimMLP, CentralizedAttention
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from ray.tune import register_env
 from tabulate import tabulate
@@ -287,45 +286,46 @@ def build_model(
         Tuple[Any, Dict]: model class & model configuration
     """
 
+    core_arch = model_preference["core_arch"]
     if algorithm.name in ["iddpg", "facmac", "maddpg"]:
-        if model_preference["core_arch"] in ["gru", "lstm"]:
+        if core_arch in ["gru", "lstm"]:
             model_class = DDPGSeriesRNN
         else:
             model_class = DDPGSeriesMLP
 
     elif algorithm.name in ["qmix", "vdn", "iql"]:
-        if model_preference["core_arch"] in ["gru", "lstm"]:
+        if core_arch in ["gru", "lstm"]:
             model_class = JointQRNN
         else:
             model_class = JointQMLP
 
     else:
         if algorithm.algo_type == "IL":
-            if model_preference["core_arch"] in ["gru", "lstm"]:
+            if core_arch in ["gru", "lstm"]:
                 model_class = BaseRNN
-            elif model_preference["core_arch"] in ["crowdsim_net"]:
+            elif core_arch in ["crowdsim_net"]:
                 model_class = CrowdSimMLP
+            elif core_arch in ['attention']:
+                model_class = CentralizedAttention
             else:
                 model_class = BaseMLP
         elif algorithm.algo_type == "CC":
-            if model_preference["core_arch"] in ["gru", "lstm"]:
+            if core_arch in ["gru", "lstm"]:
                 model_class = CentralizedCriticRNN
             else:
                 model_class = CentralizedCriticMLP
         else:  # VD
-            if model_preference["core_arch"] in ["gru", "lstm"]:
+            if core_arch in ["gru", "lstm"]:
                 model_class = ValueDecompRNN
             else:
                 model_class = ValueDecompMLP
 
-    if model_preference["core_arch"] in ["gru", "lstm"]:
+    if core_arch in ["gru", "lstm"]:
         model_config = get_model_config("rnn")
-    elif model_preference["core_arch"] in ["mlp"]:
-        model_config = get_model_config("mlp")
-    elif model_preference["core_arch"] in ["crowdsim_net"]:
-        model_config = get_model_config("crowdsim_net")
+    elif core_arch in ["mlp", "crowdsim_net", "attention"]:
+        model_config = get_model_config(core_arch)
     else:
-        raise NotImplementedError("{} not supported agent model arch".format(model_preference["core_arch"]))
+        raise NotImplementedError("{} not supported agent model arch".format(core_arch))
 
     if isinstance(environment[0].observation_space.spaces['obs'], spaces.Dict):
         if model_preference['separate_encoder'] or ('separate_encoder' in model_config and

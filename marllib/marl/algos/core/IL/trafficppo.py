@@ -184,7 +184,7 @@ def relabel_for_sample_batch(
             cur_valid_mask = cur_obs[..., status_dim:status_dim + emergency_dim].sum(axis=-1) != 0
             next_valid_mask = next_obs[..., status_dim:status_dim + emergency_dim].sum(axis=-1) != 0
             valid_mask = np.logical_and(cur_valid_mask, next_valid_mask)
-            next_obs_potential = discriminator(torch.from_numpy(next_obs).to(policy.model.device))
+            next_obs_potential = discriminator(torch.from_numpy(next_obs).to(policy.model.device), sigmoid=True)
             delta = (policy.model.reward_max - policy.model.reward_min)
             intrinsic = (next_obs_potential.cpu().numpy() - policy.model.reward_max) / delta
             intrinsic = intrinsic.ravel() * valid_mask
@@ -647,14 +647,14 @@ def add_auxiliary_loss(
             logging.debug("valid mask count: %d", torch.sum(valid_mask))
             optimizer.zero_grad()
             valid_cur_obs = cur_obs[valid_mask]
-            cur_obs_potential = discriminator(valid_cur_obs)
-            next_obs_potential = discriminator(next_obs[valid_mask])
+            cur_obs_potential = discriminator(valid_cur_obs, sigmoid=True)
+            next_obs_potential = discriminator(next_obs[valid_mask], sigmoid=True)
             target_obs = valid_cur_obs.clone().detach()
             # add gaussian noise with mean=0, variance of 0.02
             target_pos = valid_cur_obs[:, status_dim:status_dim + 2]
             noise = torch.normal(mean=0, std=0.02, size=target_pos.shape).to(device)
             target_obs[:, num_agents + 2: num_agents + 4] = target_pos + noise
-            target_obs_potential = discriminator(target_obs)
+            target_obs_potential = discriminator(target_obs, sigmoid=True)
             new_preds = torch.cat([target_obs_potential, next_obs_potential], dim=0)
             model.reward_max = torch.max(new_preds).detach().cpu().numpy() + 0.1
             model.reward_min = torch.min(new_preds).detach().cpu().numpy() - 0.1
@@ -775,6 +775,8 @@ def add_auxiliary_loss(
     if model.with_task_allocation:
         model.tower_stats['mean_' + INTRINSIC_REWARDS] = torch.mean(train_batch[INTRINSIC_REWARDS])
     model.train()
+    # underflow prevention for iter_policy.kl_coeff
+    policy.kl_coeff = max(policy.kl_coeff, policy.config['kl_coeff_min'])
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
     if model.use_gdan and (not model.use_gdan_no_loss):
         logging.debug("Training Goal Discriminator")

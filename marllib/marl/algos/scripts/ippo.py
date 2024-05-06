@@ -95,6 +95,7 @@ def run_ippo(model: Any, exp: Dict, run: Dict, env: Dict,
         "lambda": gae_lambda,
         "vf_loss_coeff": vf_loss_coeff,
         "kl_coeff": kl_coeff,
+        "kl_coeff_min": _param['kl_coeff_min'],
         "gamma": gamma,
         "vf_clip_param": vf_clip_param,
         "model": {

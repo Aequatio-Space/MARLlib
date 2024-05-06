@@ -60,7 +60,8 @@ def restore_model(restore: Dict, exp: Dict):
                     print(f"Extra keys are {diff}")
                     for key in checkpoint_arch.keys():
                         if key in check_exp and checkpoint_arch[key] != check_exp[key]:
-                            print(f"Key {key} has different value: {checkpoint_arch[key]} vs {check_exp[key]}")
+                            print(
+                                f"Key {key} has different value: checkpoint has {checkpoint_arch[key]}, input args has {check_exp[key]}")
                     raise ValueError("is not using the params required by the checkpoint model")
         model_path = restore["model_path"]
     else:

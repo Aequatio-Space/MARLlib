@@ -34,9 +34,12 @@ class Predictor(nn.Module):
             # activation_fn=None),
         )
 
-    def forward(self, x):
+    def forward(self, x, sigmoid=False):
         x = x.view(x.size(0), -1)  # 展平输入
-        return self.fc(x)
+        output = self.fc(x)
+        if sigmoid:
+            output = torch.sigmoid(torch.nan_to_num(output))
+        return output
 
 
 class AgentSelector(nn.Module):
