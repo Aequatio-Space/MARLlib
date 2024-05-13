@@ -523,8 +523,7 @@ def calculate_intrinsic(agents_position: np.ndarray,
             else:
                 last_pos = emergency_position[:, i - 1]
             distances = np.linalg.norm(last_pos - emergency_position[:, i], axis=1)
-            intrinsic[:, i] = c
-            alculate_single_intrinsic(last_pos, alpha, None, distances,
+            intrinsic[:, i] = calculate_single_intrinsic(last_pos, alpha, None, distances,
                                                          emergency_position[:, i],
                                                          emergency_states, emergency_threshold, fake, mode)
         intrinsic = np.sum(intrinsic, axis=1)
@@ -536,7 +535,7 @@ def calculate_intrinsic(agents_position: np.ndarray,
 def calculate_single_intrinsic(agents_position, alpha, anti_goal_distances, distances, emergency_position,
                                emergency_states, emergency_threshold, fake, mode, indices=None):
     mask = emergency_position.sum(axis=-1) != 0
-    # find [aoi, (x,y)] array in state
+    # find [aoi, (x,y)] array in stateL
     if not fake:
         if mode == 'none':
             intrinsic = np.zeros(len(agents_position))
@@ -996,11 +995,12 @@ def calculate_assign_rewards_lite(model: ModelV2,
                 emergency_cover_reward = 0
             else:
                 mean_reward = np.mean(rewards_by_agent[current_time:current_time + emergency_threshold, action])
-                model.reward_min = min(model.reward_min, mean_reward)
-                model.reward_max = max(model.reward_max, mean_reward)
-                # scale the reward according to reward_min and reward_max
-                if model.reward_max - model.reward_min > 0:
-                    mean_reward = (mean_reward - model.reward_min) / (model.reward_max - model.reward_min)
+                model.assign_reward_min = min(model.assign_reward_min, mean_reward)
+                model.assign_reward_max = max(model.assign_reward_max, mean_reward)
+                # scale the reward according to assign_reward_min and assign_reward_max
+                if model.assign_reward_max - model.assign_reward_min > 0:
+                    mean_reward = (mean_reward - model.assign_reward_min) / (
+                                model.assign_reward_max - model.assign_reward_min)
                 if mean_reward > 0:
                     emergency_cover_reward = mean_reward * (1 + fraction - discount_factor[action])
                 else:
@@ -1134,8 +1134,8 @@ def kl_and_loss_stats_with_regress(policy: TorchPolicy,
             if 'RL' in model.selector_type:
                 original_dict[RAW_ASSIGN_REWARDS] = torch.mean(
                     torch.stack(policy.get_tower_stats("mean_" + RAW_ASSIGN_REWARDS)))
-                original_dict['assign_reward_max'] = model.reward_max
-                original_dict['assign_reward_min'] = model.reward_min
+                original_dict['assign_reward_max'] = model.assign_reward_max
+                original_dict['assign_reward_min'] = model.assign_reward_min
                 original_dict['rl_loss'] = torch.mean(torch.stack(policy.get_tower_stats("mean_rl_loss")))
             if model.last_emergency_mode is not None:
                 for i in range(model.n_agents):

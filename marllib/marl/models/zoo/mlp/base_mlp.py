@@ -494,6 +494,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             input_dim = self.full_obs_space['obs']['agents_state'].shape[0]
             self.discriminator = Predictor(input_dim).to(self.device)
             self.optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=0.001)
+            self.reward_min = 1000
+            self.reward_max = -1000
 
         self.custom_config['emergency_dim'] = self.emergency_dim
 
@@ -619,8 +621,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     self.selector = AgentSelector(agent_selector_arch, selector_obs_space, self.n_agents).to(
                         self.device)
                     self.aux_selector = GreedyAgentSelector(self.n_agents * 3 + 2, self.n_agents).to(self.device)
-                self.reward_max = 0.3
-                self.reward_min = -0.4
+                self.assign_reward_max = 0.3
+                self.assign_reward_min = -0.4
                 if self.use_neural_ucb:
                     self.high_level_optim = self.selector.optimizer
                 else:
@@ -656,8 +658,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 executor_weights = state['weights']
                 separate_weights = split_first_level(executor_weights)
                 for key, value in separate_weights.items():
-                    # temporary hack for only loading discriminator
-                    if (not self.use_aim) or key == 'discriminator':
                         getattr(self, key).load_state_dict(value)
                 break
         if wandb.run is not None:
