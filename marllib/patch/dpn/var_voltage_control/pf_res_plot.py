@@ -121,7 +121,7 @@ def pf_res_plotly(net, cmap="Jet", use_line_geodata=None, on_map=False, projecti
             net.bus.name.astype(str) + '<br />' +
             'V_m = ' + net.res_bus.vm_pu.round(precision).astype(str) + ' pu' + '<br />' +
             'V_m = ' + (net.res_bus.vm_pu * net.bus.vn_kv.round(2)).round(precision).astype(str) + ' kV' + '<br />' +
-            'V_a = ' + net.res_bus.va_degree.round(precision).astype(str) + ' deg').tolist()
+            'V_a = ' + net.res_bus.va_degree.round(precision).astype(str) + ' deg').toItemList()
     hoverinfo = pd.Series(index=net.bus.index, data=hoverinfo)
     bus_trace = create_bus_trace(net, net.bus.index, size=bus_size, infofunc=hoverinfo, cmap=cmap,
                                  cbar_title='Bus Voltage [pu]', cmin=climits_volt[0], cmax=climits_volt[1],
@@ -141,7 +141,7 @@ def pf_res_plotly(net, cmap="Jet", use_line_geodata=None, on_map=False, projecti
             net.line.name.astype(str) + '<br />' +
             'I = ' + net.res_line.loading_percent.round(precision).astype(str) + ' %' + '<br />' +
             'I_from = ' + net.res_line.i_from_ka.round(precision).astype(str) + ' kA' + '<br />' +
-            'I_to = ' + net.res_line.i_to_ka.round(precision).astype(str) + ' kA' + '<br />').tolist()
+            'I_to = ' + net.res_line.i_to_ka.round(precision).astype(str) + ' kA' + '<br />').toItemList()
     hoverinfo = pd.Series(index=net.line.index, data=hoverinfo)
     line_traces = create_line_trace(net, use_line_geodata=use_line_geodata, respect_switches=True,
                                     width=line_width,
@@ -160,7 +160,7 @@ def pf_res_plotly(net, cmap="Jet", use_line_geodata=None, on_map=False, projecti
             net.trafo.name.astype(str) + '<br />' +
             'I = ' + net.res_trafo.loading_percent.round(precision).astype(str) + ' %' + '<br />' +
             'I_hv = ' + net.res_trafo.i_hv_ka.round(precision).astype(str) + ' kA' + '<br />' +
-            'I_lv = ' + net.res_trafo.i_lv_ka.round(precision).astype(str) + ' kA' + '<br />').tolist()
+            'I_lv = ' + net.res_trafo.i_lv_ka.round(precision).astype(str) + ' kA' + '<br />').toItemList()
     hoverinfo = pd.Series(index=net.trafo.index, data=hoverinfo)
     trafo_traces = create_trafo_trace(net, width=line_width * 1.5, infofunc=hoverinfo,
                                       cmap=cmap_lines, cmin=0, cmax=100)

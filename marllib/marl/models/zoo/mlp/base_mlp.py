@@ -7,7 +7,8 @@ from collections import deque
 from functools import reduce
 from heapq import heappush, heappop
 from typing import Tuple, Union
-
+from datetime import datetime
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import ray
@@ -85,7 +86,10 @@ class PriorityQueue(list):
         else:
             return False
 
-    def tolist(self) -> list:
+    def toItemList(self) -> list:
+        """
+        Convert all the items (excluding priority) in the queue to a list
+        """
         return [item for _, item in self if item in self.entry_finder]
 
     def __len__(self):
@@ -125,7 +129,7 @@ def split_first_level(d, convert_tensor=True):
     return result
 
 
-def others_target_as_anti_goal(env_agents_pos: np.ndarray):
+def others_target_as_anti_goal(env_agents_pos: np.ndarray, return_pos=False):
     # generate distance matrix for all agents in each environment
     num_envs, num_agents = env_agents_pos.shape[0], env_agents_pos.shape[1]
     agents_x = env_agents_pos[..., 0]
@@ -138,9 +142,13 @@ def others_target_as_anti_goal(env_agents_pos: np.ndarray):
                             repeats=num_agents)
     nearest_agent_ids = np.argmin(env_distances, axis=2).ravel() + envs_offset
     flattened_agent_pos = env_agents_pos.reshape(num_envs * num_agents, 2)
-    anti_goals_reward = np.linalg.norm(flattened_agent_pos[nearest_agent_ids] - flattened_agent_pos, axis=1)
+    anti_goals = flattened_agent_pos[nearest_agent_ids]
+    anti_goals_reward = np.linalg.norm(anti_goals - flattened_agent_pos, axis=1)
     clipped_reward = np.clip(anti_goals_reward, a_min=0, a_max=0.3)
-    return clipped_reward
+    if return_pos:
+        return clipped_reward, anti_goals
+    else:
+        return clipped_reward
 
 
 @njit
@@ -510,6 +518,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.evaluate_count_down = self.eval_interval
         self.trajectory_generated = 0
         self.episode_length = EPISODE_LENGTH
+        self.output_trajectory_interval = self.episode_length // 4
+        self.datetime_str = None
         self.switch_step = -1
         self.step_count = 0
         self.rl_update_interval = max(1, self.num_envs // 10)
@@ -559,6 +569,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.q_flag = False
         self.last_virtual_obs = self.last_buffer_indices = self.last_buffer_priority = None
         self.last_anti_goal_reward = None
+        self.last_anti_goal_position = None
         self.last_predicted_values = None
         # if self.use_gdan or self.use_gdan_lstm:
         #     self.actors = [self.main_att_encoder.p_branch]
@@ -643,6 +654,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             else:
                 raise ValueError(f"Unknown selector type {self.selector_type}")
         # Note, the final activation cannot be tanh, check.
+        self.anti_goal_list = np.zeros([self.episode_length, self.n_agents, 2], dtype=np.float32)
         self.emergency_mode_list = np.zeros([self.episode_length, self.n_agents], dtype=np.bool_)
         self.emergency_target_list = np.zeros([self.episode_length, self.n_agents, 2], dtype=np.float32)
         self.emergency_feature_in_render = 3
@@ -835,6 +847,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             target_coverage = emergency_status[..., 3]
 
             if timestep == 0:
+                self.datetime_str = datetime.now().strftime("%Y%m%d-%H%M%S")
                 for item in ['emergency_mode', 'emergency_target']:
                     setattr(self, 'last_' + item, getattr(self, item))
                 self.last_emergency_queue_length = [len(q) for q in self.emergency_buffer[:self.n_agents]]
@@ -986,13 +999,79 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             logging.debug(f"Emergency Queue: {self.emergency_buffer[:16]}")
             logging.debug(f"Emergency Queue Length: {[len(q) for q in self.emergency_buffer[:16]]}")
             if self.render or self.evaluate_count_down == 0:
+                if self.render and timestep != 0 and timestep % self.output_trajectory_interval == 0:
+                    states = input_dict['obs']['state'][Constants.IMAGE_STATE]
+                    fig, ax = plt.subplots()
+                    # Plot the heatmap
+                    plt.figure(figsize=(8, 6))
+                    heatmap_data = states[0][0].cpu().numpy() * self.episode_length
+                    plt.imshow(heatmap_data, cmap='viridis', interpolation='nearest',
+                               vmin=0, vmax=self.episode_length)
+                    # Add color bar legend
+                    for x, y in self.last_anti_goal_position[:self.n_agents]:
+                        # Convert normalized coordinates to heatmap indices
+                        heatmap_x = int(x * (heatmap_data.shape[1] - 1))
+                        heatmap_y = int(y * (heatmap_data.shape[0] - 1))
+                        # Plot a cross symbol at the corresponding heatmap position
+                        plt.plot(heatmap_x, heatmap_y, marker='x', markersize=10, color='red',
+                                 linewidth=5)
+                    # Paint emergency targets as well
+                    for x, y in self.emergency_target[:self.n_agents]:
+                        if x == -1.0 and y == -1.0:
+                            continue
+                        heatmap_x = int(x * (heatmap_data.shape[1] - 1))
+                        heatmap_y = int(y * (heatmap_data.shape[0] - 1))
+                        plt.plot(heatmap_x, heatmap_y, marker='o', markersize=10, color='blue',
+                                 linewidth=5)
+                    plt.colorbar(label='Average AoI', cmap='summer')
+                    plt.xlabel('X')
+                    plt.ylabel('Y')
+                    plt.title('Heatmap with Normalized Points')
+                    # Save the figure (including the color bar)
+                    plt.savefig(f'{self.render_file_name}_heatmap_{self.datetime_str}_{timestep}.png')
+                    plt.close()
+                    # Paint emergency in buffer on a new plot
+                    fig, ax = plt.subplots()
+                    # fix ax x and y arnge between [0,1]
+                    ax.set_xlim(0, 1)
+                    ax.set_ylim(0, 1)
+                    for i, q in enumerate(self.emergency_buffer[:self.n_agents]):
+                        if self.prioritized_buffer:
+                            indices = np.array(q.toItemList())
+                        else:
+                            indices = np.array(list(q))
+                        if len(indices) > 0:
+                            # select a color
+                            color = plt.cm.get_cmap('tab20')(i)
+                            agent_x, agent_y = env_agents_pos[0][i]
+                            ax.plot(agent_x, agent_y, marker='*', markersize=10, color=color)
+                            ax.text(agent_x, agent_y, f"Agent {i}", fontsize=12)
+                            emergencies_in_buffer = emergency_xy[indices]
+                            ax.scatter(emergencies_in_buffer[:, 0], emergencies_in_buffer[:, 1],
+                                       label=f'Agent {i} Emergencies', color=color)
+                            # label priority on each point
+                            for (priority, index) in list(q):
+                                # round priority to 2 decimal
+                                priority = int(priority * self.episode_length)
+                                x, y = emergency_xy[index]
+                                ax.text(x, y, priority, fontsize=12)
+
+                    ax.legend()
+                    ax.set_xlabel('X')
+                    ax.set_ylabel('Y')
+                    ax.set_title('Emergency Buffer Visualization')
+                    plt.savefig(f'{self.render_file_name}_buffer_{self.datetime_str}_{timestep}.png')
+                    plt.close()
+                    # output the state from first env as heatmap
                 self.emergency_target_list[timestep] = self.emergency_target[:self.n_agents]
+                if self.last_anti_goal_position is not None:
+                    self.anti_goal_list[timestep] = self.last_anti_goal_position[:self.n_agents]
                 self.emergency_mode_list[timestep] = self.emergency_mode[:self.n_agents]
                 for i, q in enumerate(self.emergency_buffer[:self.n_agents]):
                     # construct a 2d ndarray from queue, the first dim is buffer_length
                     # the second dim is (x,y,index) respectively
                     if self.prioritized_buffer:
-                        indices = np.array(q.tolist())
+                        indices = np.array(q.toItemList())
                     else:
                         indices = np.array(list(q))
                     buffer_length = len(indices)
@@ -1005,23 +1084,22 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 if self.render or self.evaluate_count_down == 0:
                     # WARNING: not modified for numpy.
                     # output all rendering information as csv
-                    import pandas as pd
-                    from datetime import datetime
                     # concatenate all rendering information
                     final_table = np.concatenate(
-                        (self.emergency_mode_list[:, :, np.newaxis], self.emergency_target_list,
+                        (self.emergency_mode_list[:, :, np.newaxis], self.anti_goal_list,
                          self.emergency_buffer_list), axis=-1)
                     columns = []
                     for a in range(self.n_agents):
-                        columns.extend([f'Agent_{a}_Mode', f'Agent_{a}_Target_X', f'Agent_{a}_Target_Y'] +
+                        columns.extend([f'Agent_{a}_Mode', f'Agent_{a}_Anti_Goal_X', f'Agent_{a}_Anti_Goal_Y'] +
                                        [f'Agent_{a}_Queue_{j}_{b}' for b in ['X', 'Y', 'Index']
                                         for j in range(self.emergency_queue_length)])
                     # convert to pandas dataframe
                     all_rendering_info = pd.DataFrame(final_table.reshape(self.episode_length, -1), columns=columns)
                     # save to csv
-                    datatime_str = datetime.now().strftime("%Y%m%d-%H%M%S")
-                    all_rendering_info.to_csv(f'{self.render_file_name}_{datatime_str}_{self.trajectory_generated}.csv')
-                    logging.debug(f"Detailed Assignment result saved to {self.render_file_name}_{datatime_str}.csv")
+                    all_rendering_info.to_csv(
+                        f'{self.render_file_name}_{self.datetime_str}_{self.trajectory_generated}.csv')
+                    logging.debug(
+                        f"Detailed Assignment result saved to {self.render_file_name}_{self.datetime_str}.csv")
                     # reset emergency_buffer_list
                     self.emergency_buffer_list.fill(-1.0)
                 if self.evaluate_count_down <= 0:
@@ -1039,7 +1117,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                                     -1, dtype=np.float32)
                 for ind, buffer in enumerate(self.emergency_buffer):
                     if self.prioritized_buffer:
-                        self.last_buffer_indices[ind, :len(buffer)] = np.array(buffer.tolist())
+                        self.last_buffer_indices[ind, :len(buffer)] = np.array(buffer.toItemList())
                         self.last_buffer_priority[ind, :len(buffer)] = np.array([item[0] for item in buffer])
                     else:
                         self.last_buffer_indices[ind, :len(buffer)] = np.array(list(buffer))
@@ -1048,10 +1126,15 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     # valid_mask = (self.assign_status != -1) & (target_coverage[::self.n_agents] == 0)
                     # env_id, emergency_index = np.nonzero(valid_mask)
                     # if len(env_id) > 0:
-                    new_anti_goal_reward = others_target_as_anti_goal(
-                        env_agents_pos,
-                    )
-                    self.last_anti_goal_reward = new_anti_goal_reward
+                    if self.render:
+                        self.last_anti_goal_reward, self.last_anti_goal_position = others_target_as_anti_goal(
+                            env_agents_pos, return_pos=True
+                        )
+                    else:
+                        self.last_anti_goal_reward = others_target_as_anti_goal(
+                            env_agents_pos,
+                        )
+
                     # else:
                     #     self.last_anti_goal_reward = np.zeros(self.num_envs * self.n_agents)
                     # self.anti_goal_reward[timestep] = new_anti_goal_reward
@@ -1142,7 +1225,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     my_buffer: PriorityQueue = my_emergency_buffer[actual_agent_id]
                     covered_emergency = set(np.nonzero(env_covered_emergency[i])[0])
                     new_buffer = PriorityQueue()
-                    for item in my_buffer.tolist():
+                    for item in my_buffer.toItemList():
                         if item not in covered_emergency:
                             # aoi = emergency_status[i][item][2]
                             if self.NN_buffer:
@@ -1186,7 +1269,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             state_info = state_info.reshape(-1, self.n_agents, *state_info.shape[2:])
         for i in non_empty_buffers:
             if self.prioritized_buffer:
-                indices = my_emergency_buffer[i].tolist()
+                indices = my_emergency_buffer[i].toItemList()
             else:
                 indices = list(my_emergency_buffer[i])
             all_buffer_xy[i, :env_buffer_lens[i // self.n_agents, i % self.n_agents] * 2] = \
@@ -1326,7 +1409,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 if self.buffer_in_obs:
                     buffer_as_obs = torch.zeros(self.emergency_dim, device=self.device)
                     if self.prioritized_buffer:
-                        indices = buffer.tolist()
+                        indices = buffer.toItemList()
                     else:
                         indices = list(buffer)
                     this_emergency_xy = torch.from_numpy(emergency_xy[i // self.n_agents][indices]).to(self.device)

@@ -119,13 +119,15 @@ def run_happo(model: Any, exp: Dict, run: Dict, env: Dict,
 
     TRAIN_MARK = 'append-data'
 
-    PPO_CONFIG.update({
-        'lr': critic_lr,
-        "lr_schedule": [
-            (0, critic_lr),
-            (int(exp['stop_timesteps']), _param['min_lr_schedule']),
-        ]
-    })
+    if 'min_lr_schedule' in _param:
+        PPO_CONFIG.update({
+            'lr': critic_lr,
+            "lr_schedule": [
+                (0, critic_lr),
+                (int(exp['stop_timesteps']), _param['min_lr_schedule']),
+            ]
+        }
+        )
 
     algorithm = exp["algorithm"]
     map_name = exp["env_args"]["map_name"]
