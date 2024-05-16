@@ -689,6 +689,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         else:
             self.emergency_buffer = [deque() for _ in range(self.n_agents * self.num_envs)]
 
+    def get_anti_goals(self):
+        return self.last_anti_goal_position
+
     def reset_states(self):
         self.last_emergency_selection.fill_(0)
         self.emergency_mode.fill(False)
@@ -999,9 +1002,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             logging.debug(f"Emergency Queue: {self.emergency_buffer[:16]}")
             logging.debug(f"Emergency Queue Length: {[len(q) for q in self.emergency_buffer[:16]]}")
             if self.render or self.evaluate_count_down == 0:
-                if self.render and timestep != 0 and timestep % self.output_trajectory_interval == 0:
+                if self.render and timestep != 0 and (timestep + 1) % self.output_trajectory_interval == 0:
                     states = input_dict['obs']['state'][Constants.IMAGE_STATE]
-                    fig, ax = plt.subplots()
                     # Plot the heatmap
                     plt.figure(figsize=(8, 6))
                     heatmap_data = states[0][0].cpu().numpy() * self.episode_length
@@ -1036,16 +1038,16 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     ax.set_xlim(0, 1)
                     ax.set_ylim(0, 1)
                     for i, q in enumerate(self.emergency_buffer[:self.n_agents]):
+                        color = plt.cm.get_cmap('tab20')(i)
+                        agent_x, agent_y = env_agents_pos[0][i]
+                        ax.plot(agent_x, agent_y, marker='*', markersize=10, color=color)
+                        ax.text(agent_x, agent_y, f"Agent {i}", fontsize=12)
                         if self.prioritized_buffer:
                             indices = np.array(q.toItemList())
                         else:
                             indices = np.array(list(q))
                         if len(indices) > 0:
                             # select a color
-                            color = plt.cm.get_cmap('tab20')(i)
-                            agent_x, agent_y = env_agents_pos[0][i]
-                            ax.plot(agent_x, agent_y, marker='*', markersize=10, color=color)
-                            ax.text(agent_x, agent_y, f"Agent {i}", fontsize=12)
                             emergencies_in_buffer = emergency_xy[indices]
                             ax.scatter(emergencies_in_buffer[:, 0], emergencies_in_buffer[:, 1],
                                        label=f'Agent {i} Emergencies', color=color)
