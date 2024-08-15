@@ -129,6 +129,7 @@ def relabel_for_sample_batch(
     num_agents = policy.model.n_agents
     # postprocess extra_batches
     try:
+        # fill observation with emergency target
         virtual_obs = sample_batch[VIRTUAL_OBS]
         sample_batch[SampleBatch.OBS][..., :status_dim + emergency_dim] = virtual_obs
     except KeyError:
@@ -191,6 +192,7 @@ def relabel_for_sample_batch(
         # intrinsic[torch.mean(distance_between_agents < 0.1) > 0] *= 1.5
         sample_batch[ORIGINAL_REWARDS] = deepcopy(sample_batch[SampleBatch.REWARDS])
         sample_batch[INTRINSIC_REWARDS] = intrinsic
+        # additional of intrinsic rewards.
         if isinstance(sample_batch[SampleBatch.REWARDS], torch.Tensor):
             sample_batch[SampleBatch.REWARDS] += torch.from_numpy(intrinsic)
         else:
@@ -253,7 +255,8 @@ def relabel_for_sample_batch(
                     generator_obs = np.hstack([observation[single_valid_step, num_agents + 2:num_agents + 4],
                                                emergency_states[single_valid_step, index, :3]])
                     observation_list.append(generator_obs)
-                    # labels are descending number normalized by episode length, the largest number is np.count_nonzero(single_valid_step)
+                    # labels are descending number normalized by episode length,
+                    # the largest number is np.count_nonzero(single_valid_step)
                     longest_timestep = np.count_nonzero(single_valid_step)
                     labels = np.arange(start=longest_timestep, stop=0, step=-1) / episode_length
                     label_list.append(labels)
@@ -267,7 +270,6 @@ def relabel_for_sample_batch(
     return label_done_masks_and_calculate_gae_for_sample_batch(policy, sample_batch,
                                                                other_agent_batches, episode)
 
-    # try, send relabeled trajectory only.
 
 
 def NN_bootstrap_reward(emergency_dim, emergency_position, emergency_states, observation, policy, selector_type,
@@ -518,6 +520,7 @@ def calculate_intrinsic(agents_position: np.ndarray,
         emergency_num = emergency_position.shape[1]
         intrinsic = np.zeros((len(agents_position), emergency_num))
         for i in range(emergency_num):
+            # calculate intrinsic one by one (adjacent emergency targets)
             if i == 0:
                 last_pos = agents_position
             else:
@@ -570,6 +573,11 @@ def calculate_single_intrinsic(agents_position, alpha, anti_goal_distances, dist
 def match_aoi(all_emergencies_position: np.ndarray,
               emergency_position: np.ndarray,
               mask: np.ndarray):
+    """
+    Match the AoI information for given all_emergencies_position
+    mask is an array, if entry in given index is false, the indices will be set as -1.
+    (Note, since python supports reverse indexing, it may result in faulty data, be sure to use mask.)
+    """
     indices = np.full((len(emergency_position)), dtype=np.int32, fill_value=-1)
     for i, this_timestep_pos in enumerate(emergency_position):
         if mask[i]:
@@ -843,6 +851,7 @@ def calculate_assign_rewards(allocated_emergencies, allocation_list, assign_rewa
     emergency_xy = emergency_states[..., 0:2][-1]
     for i, (emergency, emergency_start, emergency_end) in enumerate(
             zip(allocated_emergencies, start_indices, end_indices)):
+        # we only allocate when the emergency position is found, and the assign reward is not -2
         allocate_index = np.nonzero((emergency[0] == allocation_list[:, 0]) &
                                     (emergency[1] == allocation_list[:, 1]) &
                                     (assign_rewards != -2))[0]

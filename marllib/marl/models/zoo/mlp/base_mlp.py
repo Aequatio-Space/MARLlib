@@ -713,6 +713,9 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         # self.collision_count = torch.zeros((self.n_agents * self.num_envs), device=self.device, dtype=torch.int32)
 
     def train_goal_discriminator(self):
+        """
+        Training Code for Goal Discriminator (from GDAN)
+        """
         batch = self.goal_storage.sample(self.goal_batch_size)
         if isinstance(batch.goal, dict):
             batch_state = {k: torch.tensor(v).to(self.device) for k, v in batch.goal.items()}
@@ -756,6 +759,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             self._features = self.p_encoder(self.inputs)
             _, embedding = self.discriminator(self._features)
             self._features = torch.cat([self._features, embedding], dim=1)
+            # additional features will be concatenated into main branch.
             output = self.p_branch(self._features)
             if self.custom_config["mask_flag"]:
                 output = output + inf_mask
@@ -839,6 +843,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
             timestep = input_dict['obs']['state'][Constants.VECTOR_STATE][..., -1][0].to(torch.int32).item()
             logging.debug("NN logged timestep: {}".format(timestep))
             if not_dummy_batch:
+                # Agent Position is right after one hot encoding.
                 env_agents_pos = numpy_observations[:, self.n_agents + 2: self.n_agents + 4].reshape(-1,
                                                                                                      self.n_agents,
                                                                                                      2)
@@ -851,6 +856,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
 
             if timestep == 0:
                 self.datetime_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+                # update last state of mode and target for logging.
                 for item in ['emergency_mode', 'emergency_target']:
                     setattr(self, 'last_' + item, getattr(self, item))
                 self.last_emergency_queue_length = [len(q) for q in self.emergency_buffer[:self.n_agents]]
@@ -1263,6 +1269,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         env_agents_pos = all_env_obs[:, :, n_agents + 2: n_agents + 4]
         env_buffer_lens = torch.tensor([len(q) for q in my_emergency_buffer]).reshape(
             self.num_envs, self.n_agents).to(self.device)
+        # if the buffer len reaches maximum limit, ignore this buffer at this round.
         invalid_mask: torch.Tensor = env_buffer_lens >= self.emergency_queue_length
         all_buffer_xy = torch.zeros((self.num_envs * self.n_agents, self.emergency_queue_length * 2),
                                     device=self.device)
@@ -1274,6 +1281,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                 indices = my_emergency_buffer[i].toItemList()
             else:
                 indices = list(my_emergency_buffer[i])
+            # entries with index smaller than env_buffer_lens are loaded.
             all_buffer_xy[i, :env_buffer_lens[i // self.n_agents, i % self.n_agents] * 2] = \
                 torch.from_numpy(emergency_xy[i][indices].flatten()).to(self.device)
         if len(env_valid_emergencies) == 0:
@@ -1378,6 +1386,8 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                                                 2 * agents_buffer_lens[action]] = torch_emergency
                         single_invalid_mask[action] = agents_buffer_lens[action] >= self.emergency_queue_length
                         if self.look_ahead:
+                            # look ahead update agent's location as the newly assigned emergency PoI location
+                            # which forms a virtual future path that enables effective assignment
                             agents_pos[action] = torch_emergency
                         this_assign_status[this_index] = action
                         logging.debug(f"Assign Status in Env {i} is {this_assign_status}")
@@ -1391,6 +1401,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                         'timesteps': np.full_like(action_list, timestep, dtype=np.int32)
                     }
                     if self.rl_use_cnn:
+                        # add heatmap state if we use cnn as encoder.
                         construct_dict[Constants.IMAGE_STATE] = torch.cat(state_grid_list, dim=0).cpu().numpy()
                     self.last_rl_transitions[i].append(SampleBatch(construct_dict))
 
@@ -1423,6 +1434,7 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
                     buffer_as_obs[:my_len * self.emergency_feature_dim] = buffer_features
                     all_obs[i][self.status_dim:self.status_dim + self.emergency_dim] = buffer_as_obs
                 else:
+                    # directly use distance as weight for weighted buffer.
                     if not self.prioritized_buffer:
                         head_distance = np.linalg.norm(agent_pos.cpu().numpy() - new_emergency_xy)
                     if self.emergency_feature_dim > 2:
@@ -1586,12 +1598,14 @@ def construct_query_batch(
             # target is covered, reset emergency mode
             # logging.debug("my_emergency_index: {}".format(my_emergency_index[i]))
             if len(my_buffer) == 0:
+                # reset buffer entries
                 my_emergency_mode[i] = 0
                 my_emergency_target[i] = -1
                 my_emergency_index[i] = -1
             else:
                 new_emergency = my_buffer.popleft()
                 while this_coverage[new_emergency] and len(my_buffer) > 0:
+                    # remove emergency as long as it is covered.
                     new_emergency = my_buffer.popleft()
                 my_emergency_index[i] = new_emergency
                 logging.debug(f"Selecting from buffer: {my_emergency_index[i]}")
