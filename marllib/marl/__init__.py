@@ -28,7 +28,7 @@ from marllib.marl.algos.scripts import POlICY_REGISTRY
 from marllib.envs.base_env import ENV_REGISTRY
 from marllib.envs.global_reward_env import COOP_ENV_REGISTRY
 from marllib.marl.models import BaseRNN, BaseMLP, CentralizedCriticRNN, CentralizedCriticMLP, ValueDecompRNN, \
-    ValueDecompMLP, JointQMLP, JointQRNN, DDPGSeriesRNN, DDPGSeriesMLP, CrowdSimMLP, CentralizedAttention
+    ValueDecompMLP, JointQMLP, JointQRNN, DDPGSeriesRNN, DDPGSeriesMLP, CrowdSimMLP, CentralizedAttention, PredLoc
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from ray.tune import register_env
 from tabulate import tabulate
@@ -307,6 +307,8 @@ def build_model(
                 model_class = CrowdSimMLP
             elif core_arch in ['attention']:
                 model_class = CentralizedAttention
+            elif core_arch in ['pred_loc']:
+                model_class = PredLoc
             else:
                 model_class = BaseMLP
         elif algorithm.algo_type == "CC":
@@ -322,7 +324,7 @@ def build_model(
 
     if core_arch in ["gru", "lstm"]:
         model_config = get_model_config("rnn")
-    elif core_arch in ["mlp", "crowdsim_net", "attention"]:
+    elif core_arch in ["mlp", "crowdsim_net", "attention", 'pred_loc']:
         model_config = get_model_config(core_arch)
     else:
         raise NotImplementedError("{} not supported agent model arch".format(core_arch))

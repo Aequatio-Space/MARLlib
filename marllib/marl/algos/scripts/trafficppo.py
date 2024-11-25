@@ -1,7 +1,7 @@
 # MIT License
 from typing import Any, Dict
 
-from marllib.marl.algos.core.IL.trafficppo import TrafficPPOTrainer
+from marllib.marl.algos.core.IL.trafficppo import TrafficPPOTrainer, PredLocPPOTrainer
 from marllib.marl.algos.scripts.coma import restore_model
 from marllib.marl.algos.utils.log_dir_util import available_local_dir
 from marllib.marl.algos.utils.setup_utils import AlgVar
@@ -116,8 +116,12 @@ def run_traffic_ppo(model: Any, exp: Dict, run: Dict, env: Dict,
     map_name = exp["env_args"]["map_name"]
     RUNNING_NAME = '_'.join([algorithm, arch, map_name])
     model_path = restore_model(restore, exp)
-
-    results = tune.run(TrafficPPOTrainer,
+    # print('-----------------------before run -----------------------------')
+    if arch == 'pred_loc':
+        trainer = PredLocPPOTrainer
+    else:
+        trainer = TrafficPPOTrainer
+    results = tune.run(trainer,
                        name=RUNNING_NAME,
                        checkpoint_at_end=exp['checkpoint_end'],
                        checkpoint_freq=exp['checkpoint_freq'],
@@ -128,5 +132,7 @@ def run_traffic_ppo(model: Any, exp: Dict, run: Dict, env: Dict,
                        progress_reporter=CLIReporter(),
                        local_dir=available_local_dir if exp["local_dir"] == "" else exp["local_dir"],
                        resume=resume)
+
+    # print('-----------------------after run -----------------------------')
 
     return results

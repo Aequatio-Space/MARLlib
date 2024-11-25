@@ -391,7 +391,6 @@ class CrowdSimMLP(TorchModelV2, nn.Module, BaseMLPMixin):
         self.rl_gamma = self.model_arch_args['rl_gamma']
         self.sibling_rivalry = self.model_arch_args['sibling_rivalry']
         self.alpha = self.model_arch_args['alpha']
-
         self.emergency_threshold = self.model_arch_args['emergency_threshold']
         self.tolerance = self.model_arch_args['tolerance']
         self.dataset_name = self.model_arch_args['dataset']

@@ -34,6 +34,8 @@ from tqdm import tqdm
 from envs.crowd_sim.utils import get_emergency_labels
 from warp_drive.utils.constants import Constants
 
+AGENT_COORDINATES = 'agent_coords'
+
 INTRINSIC_REWARDS = 'intrinsic_rewards'
 
 RAW_ASSIGN_REWARDS = 'assign_rewards'
@@ -113,7 +115,7 @@ def relabel_for_sample_batch(
     k = 0
     goal_number = 5
 
-    selector_type = policy.model.selector_type
+    # selector_type = policy.model.selector_type
     intrinsic_mode = policy.model.intrinsic_mode
     intrinsic_mode = intrinsic_mode
     use_intrinsic = intrinsic_mode != 'none'
@@ -1129,6 +1131,27 @@ def extra_action_out_fn(policy, input_dict, state_batches, model, action_dist):
     return extra_dict
 
 
+def extra_action_out_pred_loc(policy, input_dict, state_batches, model, action_dist):
+    extra_dict = vf_preds_fetches(policy, input_dict, state_batches, model, action_dist)
+    x_list = model.agent_x_time_list
+    y_list = model.agent_y_time_list
+    num_agents = model.n_agents
+    num_envs = model.num_envs
+    length_x = len(x_list)
+    length_y = len(y_list)
+    if length_x == model.horizon + 1 and length_y == model.horizon + 1:
+        # x_list contains [num_envs, num_agents] of x coordinates
+        # y_list contains [num_envs, num_agents] of y coordinates
+        # stack [x, y] on the last dimension makes [num_envs, num_agents, 2] vector,
+        # which indicates (x,y) of a single timestep
+        # stack a list of vector on axis=1, so you get [num_envs, time_horizon, agent_num, coordinate_num]
+        agent_coords = np.stack([np.stack([x_list[0], y_list[0]], axis=-1).repeat(num_agents, 0)
+                                 for x, y in zip(x_list, y_list)], axis=1)
+        extra_dict[AGENT_COORDINATES] = agent_coords
+    else:
+        extra_dict[AGENT_COORDINATES] = np.zeros((num_agents * num_envs, model.horizon + 1, num_agents, 2))
+    return extra_dict
+
 def kl_and_loss_stats_with_regress(policy: TorchPolicy,
                                    train_batch: SampleBatch) -> Dict[str, TensorType]:
     """
@@ -1227,13 +1250,30 @@ def after_loss_init(policy: Policy, observation_space: gym.spaces.Space,
         INTRINSIC_REWARDS, shift=0, used_for_training=True)
 
 
+def after_loss_init_pred_loc(policy: Policy, observation_space: gym.spaces.Space,
+                             action_space: gym.spaces.Space, config: TrainerConfigDict) -> None:
+    policy.view_requirements[AGENT_COORDINATES] = ViewRequirement(
+        AGENT_COORDINATES, shift=0, used_for_training=True)
 
+
+def pred_loc_loss(
+        policy: TorchPolicy, model: ModelV2,
+        dist_class: Type[TorchDistributionWrapper],
+        train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
+    model.train()
+    total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
+    model.eval()
+    return total_loss
 
 
 def get_policy_class_traffic_ppo(config_):
     if config_["framework"] == "torch":
         return TrafficPPOTorchPolicy
 
+
+def get_policy_class_pred_loc(config_):
+    if config_["framework"] == "torch":
+        return PredLocPPOTorchPolicy
 
 @njit
 def get_emergency_start_end_numba(emergency_obs: np.ndarray):
@@ -1295,6 +1335,20 @@ TrafficPPOTorchPolicy = PPOTorchPolicy.with_updates(
     extra_action_out_fn=extra_action_out_fn,
     stats_fn=kl_and_loss_stats_with_regress,
     _after_loss_init=after_loss_init,
+)
+
+PredLocPPOTorchPolicy = PPOTorchPolicy.with_updates(
+    name="PredLocPPOTorchPolicy",
+    get_default_config=lambda: PPO_CONFIG,
+    extra_action_out_fn=extra_action_out_pred_loc,
+    loss_fn=pred_loc_loss,
+    _after_loss_init=after_loss_init_pred_loc,
+)
+
+PredLocPPOTrainer = WandbPPOTrainer.with_updates(
+    name="PREDICTLOCATIONPPOTrainer",
+    default_policy=None,
+    get_policy_class=get_policy_class_pred_loc,
 )
 
 TrafficPPOTrainer = WandbPPOTrainer.with_updates(
