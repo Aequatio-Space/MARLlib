@@ -4,7 +4,7 @@ from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 
 from marllib.marl.models.zoo.mlp.base_mlp import BaseMLPMixin
 from marllib.marl.algos.utils.setup_utils import get_device
-from marllib.marl.models.zoo.encoder import BaseEncoder
+from marllib.marl.models.zoo.encoder import BaseEncoder, LocPredEncoder
 from ray.rllib.models.torch.misc import SlimFC, normc_initializer
 from ray.rllib.utils.typing import Dict, TensorType, List
 from ray.rllib.utils.annotations import override
@@ -31,7 +31,7 @@ class PredLoc(TorchModelV2, nn.Module, BaseMLPMixin):
                               model_config, name)
         nn.Module.__init__(self)
         BaseMLPMixin.__init__(self)
-        # decide the model arch
+        # decide the model arch 
         self.inputs = None
         self.custom_config = model_config["custom_model_config"]
         self.model_arch_args = self.custom_config['model_arch_args']
@@ -47,6 +47,7 @@ class PredLoc(TorchModelV2, nn.Module, BaseMLPMixin):
         self.p_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
         self.vf_encoder = BaseEncoder(model_config, self.full_obs_space).to(self.device)
 
+        self.loc_pred = LocPredEncoder(max_pos_value=600).to(self.device)
         self.p_branch = SlimFC(
             in_size=self.p_encoder.output_dim,
             out_size=num_outputs,
@@ -71,8 +72,10 @@ class PredLoc(TorchModelV2, nn.Module, BaseMLPMixin):
         self.actors = [self.p_encoder, self.p_branch]
         self.critics = [self.vf_encoder, self.vf_branch]
         self.actor_initialized_parameters = self.actor_parameters()
-        self.agent_x_time_list = deque(maxlen=self.horizon + 1)
-        self.agent_y_time_list = deque(maxlen=self.horizon + 1)
+        # shape: [horizon + 1, num_envs, num_agents]
+        self.agent_x_time_list = deque(maxlen=self.horizon + 1)  # for history
+        self.agent_y_time_list = deque(maxlen=self.horizon + 1)  # for history
+        self.current_timestep = 0
         if wandb.run is not None:
             wandb.watch(models=tuple(self.actors), log='all')
 
@@ -88,12 +91,35 @@ class PredLoc(TorchModelV2, nn.Module, BaseMLPMixin):
     def forward(self, input_dict: Dict[str, TensorType],
                 state: List[TensorType],
                 seq_lens: TensorType) -> (TensorType, List[TensorType]):
+        # print('in foward!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+        # print('input_dict keys:', input_dict.keys())
+        # Simply convert deque content to tensor
+        # if len(self.agent_x_time_list) > 0:
+        #     self.agent_x_history = torch.stack(list(self.agent_x_time_list), dim=0).to(self.device)
+        #     self.agent_y_history = torch.stack(list(self.agent_y_time_list), dim=0).to(self.device)
+        #     print(
+        #         f"self.agent_x_history shape: {self.agent_x_history.shape}, self.agent_y_history shape: {self.agent_y_history.shape}")
+        #     loc_pred = self.loc_pred(self.agent_x_history, self.agent_y_history)
+        #     # Shape: [num_envs, num_agents, hidden_dim]
+        #     loc_pred = loc_pred.unsqueeze(1).repeat(1, self.n_agents, 1, 1)
+        #     # Shape: [num_envs, num_agents, num_agents, hidden_dim]
+
+        #     # Directly mask out each agent's own prediction
+        #     for i in range(self.n_agents):
+        #         loc_pred[:, i, i, :] = 0
+
+        #     # Reshape to concatenate all predictions
+        #     final_pred = loc_pred.sum(-2)
+        # else:
+        #     final_pred = torch.zeros((self.num_envs, self.n_agents, self.loc_pred.hidden_dim), device=self.device)
+        #     # Shape: [num_envs, num_agents, hidden_dim]
+
         if self._is_train:
-            pass
-            # get agent location in input_dict['agent_coords']
+            print("train: input_dict", input_dict.keys())
         else:
             pass
-            # get current agent location from the tail of deque
+        #     final_pred = final_pred.detach()
+        # input_dict['pred_other_loc'] = final_pred
 
         return BaseMLPMixin.forward(self, input_dict, state, seq_lens)
 

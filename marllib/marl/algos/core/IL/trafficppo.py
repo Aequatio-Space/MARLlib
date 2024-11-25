@@ -30,12 +30,13 @@ from ray.rllib.utils.typing import TensorType, TrainerConfigDict, AgentID
 from torch import optim
 from torch.distributions import Categorical
 from tqdm import tqdm
-
+from einops import rearrange
 from envs.crowd_sim.utils import get_emergency_labels
 from warp_drive.utils.constants import Constants
 
 AGENT_COORDINATES = 'agent_coords'
 
+PRED_OTHER_LOC = 'pred_other_loc'
 INTRINSIC_REWARDS = 'intrinsic_rewards'
 
 RAW_ASSIGN_REWARDS = 'assign_rewards'
@@ -1140,16 +1141,32 @@ def extra_action_out_pred_loc(policy, input_dict, state_batches, model, action_d
     length_x = len(x_list)
     length_y = len(y_list)
     if length_x == model.horizon + 1 and length_y == model.horizon + 1:
-        # x_list contains [num_envs, num_agents] of x coordinates
-        # y_list contains [num_envs, num_agents] of y coordinates
-        # stack [x, y] on the last dimension makes [num_envs, num_agents, 2] vector,
-        # which indicates (x,y) of a single timestep
-        # stack a list of vector on axis=1, so you get [num_envs, time_horizon, agent_num, coordinate_num]
-        agent_coords = np.stack([np.stack([x_list[0], y_list[0]], axis=-1).repeat(num_agents, 0)
-                                 for x, y in zip(x_list, y_list)], axis=1)
-        extra_dict[AGENT_COORDINATES] = agent_coords
+        x_arr = np.array(x_list)
+        y_arr = np.array(y_list)
+        assert x_arr.shape == (model.horizon + 1, num_envs, num_agents)
+        # shape: [horizon + 1, num_envs, num_agents]
     else:
-        extra_dict[AGENT_COORDINATES] = np.zeros((num_agents * num_envs, model.horizon + 1, num_agents, 2))
+        x_arr = np.zeros((model.horizon + 1, num_envs, num_agents))
+        y_arr = np.zeros((model.horizon + 1, num_envs, num_agents))
+    x_tensor = torch.from_numpy(x_arr).to(model.device).float()
+    y_tensor = torch.from_numpy(y_arr).to(model.device).float()
+    agent_coords = torch.cat((x_tensor.unsqueeze(-1), y_tensor.unsqueeze(-1)), dim=-1)
+    agent_coords = rearrange(agent_coords, 'h e a p -> (e a) h p')
+    print('>>>>>>>>>> agent_coords.shape:', agent_coords.shape)
+    extra_dict[AGENT_COORDINATES] = agent_coords
+    loc_pred = model.loc_pred(x_tensor, y_tensor)
+    loc_pred_obs = loc_pred.unsqueeze(1).repeat(1, num_agents, 1, 1)
+    # Shape: [num_envs, num_agents, num_agents, hidden_dim]
+
+    # Directly mask out each agent's own prediction
+    for i in range(num_agents):
+        loc_pred_obs[:, i, i, :] = 0
+
+    # Reshape to concatenate all predictions
+    loc_pred_obs = loc_pred_obs.sum(-2)
+    # Shape: [num_envs, num_agents, hidden_dim]
+    print('loc_pred_obs shape:', loc_pred_obs.shape)
+    extra_dict[PRED_OTHER_LOC] = rearrange(loc_pred_obs, 'e a f -> (e a) f')
     return extra_dict
 
 def kl_and_loss_stats_with_regress(policy: TorchPolicy,
@@ -1254,13 +1271,16 @@ def after_loss_init_pred_loc(policy: Policy, observation_space: gym.spaces.Space
                              action_space: gym.spaces.Space, config: TrainerConfigDict) -> None:
     policy.view_requirements[AGENT_COORDINATES] = ViewRequirement(
         AGENT_COORDINATES, shift=0, used_for_training=True)
-
+    policy.view_requirements[PRED_OTHER_LOC] = ViewRequirement(
+        AGENT_COORDINATES, shift=0, used_for_training=True)
 
 def pred_loc_loss(
         policy: TorchPolicy, model: ModelV2,
         dist_class: Type[TorchDistributionWrapper],
         train_batch: SampleBatch) -> Union[TensorType, List[TensorType]]:
     model.train()
+    # expected shape: [num_envs, horizon + 1, num_agents, 2]
+    # print("------------------------> train_batch:", train_batch[PRED_OTHER_LOC].shape)
     total_loss = ppo_surrogate_loss(policy, model, dist_class, train_batch)
     model.eval()
     return total_loss
@@ -1269,7 +1289,6 @@ def pred_loc_loss(
 def get_policy_class_traffic_ppo(config_):
     if config_["framework"] == "torch":
         return TrafficPPOTorchPolicy
-
 
 def get_policy_class_pred_loc(config_):
     if config_["framework"] == "torch":
