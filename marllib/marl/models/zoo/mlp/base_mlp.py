@@ -36,8 +36,8 @@ from warp_drive.utils.constants import Constants
 from .selector import Predictor, AgentSelector, RandomSelector, GreedySelector, \
     GreedyAgentSelector, RandomAgentSelector
 
-# EPISODE_LENGTH = 120
-EPISODE_LENGTH = 240
+EPISODE_LENGTH = 120
+# EPISODE_LENGTH = 240
 
 rendering_queue_feature = 3
 

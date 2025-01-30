@@ -1152,7 +1152,6 @@ def extra_action_out_pred_loc(policy, input_dict, state_batches, model, action_d
     y_tensor = torch.from_numpy(y_arr).to(model.device).float()
     agent_coords = torch.cat((x_tensor.unsqueeze(-1), y_tensor.unsqueeze(-1)), dim=-1)
     agent_coords = rearrange(agent_coords, 'h e a p -> (e a) h p')
-    print('>>>>>>>>>> agent_coords.shape:', agent_coords.shape)
     extra_dict[AGENT_COORDINATES] = agent_coords
     loc_pred = model.loc_pred(x_tensor, y_tensor)
     loc_pred_obs = loc_pred.unsqueeze(1).repeat(1, num_agents, 1, 1)
@@ -1165,8 +1164,8 @@ def extra_action_out_pred_loc(policy, input_dict, state_batches, model, action_d
     # Reshape to concatenate all predictions
     loc_pred_obs = loc_pred_obs.sum(-2)
     # Shape: [num_envs, num_agents, hidden_dim]
-    print('loc_pred_obs shape:', loc_pred_obs.shape)
     extra_dict[PRED_OTHER_LOC] = rearrange(loc_pred_obs, 'e a f -> (e a) f')
+    print('------------------> input_dict.keys():', input_dict.keys())
     return extra_dict
 
 def kl_and_loss_stats_with_regress(policy: TorchPolicy,

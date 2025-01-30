@@ -89,7 +89,10 @@ class AgentSelector(nn.Module):
 
     def forward(self, input_obs, invalid_mask=None, grid=None):
         if self.use_2d_state:
+            # print('1')
             if self.use_attention:
+                # print('1-1')
+
                 agents_feature, emergency = (input_obs[..., :-self.emergency_feature_dim],
                                              input_obs[..., -self.emergency_feature_dim:])
                 logging.debug("Agent State Shape: {}".format(agents_feature.shape))
@@ -105,6 +108,8 @@ class AgentSelector(nn.Module):
                 embedding, weights_matrix = embedding.squeeze(1), weights_matrix.squeeze(1)
                 self.last_weight_matrix = weights_matrix
             else:
+                # print('1-2')
+
                 input_dict = {
                     "obs": input_obs,
                     "grid": grid
@@ -120,6 +125,7 @@ class AgentSelector(nn.Module):
                 embedding = self.attention(embedding, emergency)
             else:
                 embedding = self.encoder(input_obs)
+
         raw_output = self.out_branch(embedding)
         if invalid_mask is not None:
             raw_output -= invalid_mask * (FLOAT_MAX / 2)
