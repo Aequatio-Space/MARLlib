@@ -274,7 +274,6 @@ def relabel_for_sample_batch(
                                                                other_agent_batches, episode)
 
 
-
 def NN_bootstrap_reward(emergency_dim, emergency_position, emergency_states, observation, policy, selector_type,
                         status_dim):
     assert 'NN' == selector_type[0] and len(

@@ -23,3 +23,4 @@
 from .attention_encoder import *
 from .base_encoder import *
 from .triple_encoder import *
+from .pos_encoder import *
